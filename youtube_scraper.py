@@ -219,10 +219,41 @@ def scroll(driver):
 
 
 def get_driver():
+    import shutil, os
     options = webdriver.ChromeOptions()
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
-    service = Service(ChromeDriverManager().install())
+    options.add_argument('--disable-gpu')
+    options.add_argument('--headless')          # 클라우드 환경 필수
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument('--disable-setuid-sandbox')
+    options.add_argument('--remote-debugging-port=9222')
+
+    # Streamlit Cloud: apt로 설치된 chromium-driver 우선 사용
+    chromium_paths = [
+        '/usr/bin/chromedriver',          # Streamlit Cloud (apt)
+        '/usr/lib/chromium-browser/chromedriver',
+        shutil.which('chromedriver') or '',
+    ]
+    chromium_bin_paths = [
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        shutil.which('chromium') or '',
+        shutil.which('chromium-browser') or '',
+    ]
+
+    driver_path = next((p for p in chromium_paths if p and os.path.exists(p)), None)
+    binary_path = next((p for p in chromium_bin_paths if p and os.path.exists(p)), None)
+
+    if driver_path:
+        # 클라우드 환경: 시스템 chromedriver 사용
+        if binary_path:
+            options.binary_location = binary_path
+        service = Service(driver_path)
+    else:
+        # 로컬 환경: webdriver-manager 자동 설치
+        service = Service(ChromeDriverManager().install())
+
     return webdriver.Chrome(service=service, options=options)
 
 
