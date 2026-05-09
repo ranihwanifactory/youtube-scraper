@@ -32,7 +32,6 @@ if 'total_collected' not in st.session_state:
     st.session_state.total_collected = 0
 if 'filtered_count' not in st.session_state:
     st.session_state.filtered_count = 0
-# 채널 목록: [{'name': '표시이름', 'url': '정규화된URL'}, ...]
 if 'channel_list' not in st.session_state:
     st.session_state.channel_list = []
 if 'selected_channels' not in st.session_state:
@@ -69,7 +68,6 @@ def normalize_channel_url(raw: str) -> str:
 with st.sidebar:
     st.header("⚙️ 검색 설정")
 
-    # ── 검색 모드 선택 ──────────────────────────────────
     search_mode = st.radio(
         "🎯 검색 모드",
         options=["키워드 검색", "채널 검색"],
@@ -84,10 +82,8 @@ with st.sidebar:
         channel_input = ""
 
     else:
-        # ── 채널 목록 관리 ──────────────────────────────
         st.subheader("📺 채널 목록 관리")
 
-        # 채널 추가 입력
         col_ch, col_add = st.columns([3, 1])
         with col_ch:
             new_ch_input = st.text_input(
@@ -102,7 +98,6 @@ with st.sidebar:
 
         if add_btn and new_ch_input.strip():
             normalized = normalize_channel_url(new_ch_input.strip())
-            # 표시 이름: @핸들 또는 URL 마지막 경로
             display_name = new_ch_input.strip()
             existing_urls = [c['url'] for c in st.session_state.channel_list]
             if normalized not in existing_urls:
@@ -114,7 +109,6 @@ with st.sidebar:
             else:
                 st.warning("이미 추가된 채널입니다.")
 
-        # 채널 목록 표시 + 삭제
         if not st.session_state.channel_list:
             st.caption("아직 추가된 채널이 없습니다.")
         else:
@@ -134,7 +128,6 @@ with st.sidebar:
             if to_delete is not None:
                 removed_url = st.session_state.channel_list[to_delete]['url']
                 st.session_state.channel_list.pop(to_delete)
-                # 체크박스 session_state 키 제거
                 chk_key = f"chk_{removed_url}"
                 if chk_key in st.session_state:
                     del st.session_state[chk_key]
@@ -144,13 +137,11 @@ with st.sidebar:
 
         st.divider()
 
-        # ── 채널 선택 (수집 대상) ────────────────────────
         st.subheader("✅ 수집할 채널 선택")
         if not st.session_state.channel_list:
             st.caption("위에서 채널을 먼저 추가하세요.")
             selected_channels = []
         else:
-            # 전체 선택/해제 — session_state 키로 체크박스 직접 제어
             col_all, col_none = st.columns(2)
             with col_all:
                 if st.button("전체 선택", use_container_width=True, key="sel_all"):
@@ -163,42 +154,54 @@ with st.sidebar:
                         st.session_state[f"chk_{ch['url']}"] = False
                     st.rerun()
 
-            # 체크박스: session_state 키로 렌더링 → 버튼이 값을 직접 주입 가능
             selected_channels = []
             for ch in st.session_state.channel_list:
                 chk_key = f"chk_{ch['url']}"
-                # 처음 렌더링 시 기본값 설정 (이미 있으면 유지)
                 if chk_key not in st.session_state:
                     st.session_state[chk_key] = ch['url'] in st.session_state.selected_channels
                 val = st.checkbox(ch['name'], key=chk_key)
                 if val:
                     selected_channels.append(ch['url'])
 
-            # selected_channels 동기화
             st.session_state.selected_channels = selected_channels
 
         st.divider()
 
-        # ── 채널 탭 선택 ────────────────────────────────
-        st.subheader("📅 수집 탭")
-        channel_tab = st.selectbox(
-            "채널 페이지 탭",
-            options=["동영상", "쇼츠"],
-            help="동영상: 일반 영상 탭 / 쇼츠: 쇼츠 탭"
+        # ── 채널 검색 방식 선택 ──────────────────────────
+        st.subheader("🔍 채널 내 검색 방식")
+        channel_search_mode = st.radio(
+            "검색 방식",
+            options=["탭 수집 (전체 영상)", "키워드로 채널 내 검색"],
+            help="탭 수집: 채널의 동영상/쇼츠 탭 전체 수집\n키워드 검색: 채널 내에서 특정 키워드로 검색",
+            key="channel_search_mode"
         )
 
-        # ── 채널 내 키워드 필터 ──────────────────────────
-        keyword = st.text_input(
-            "🔍 제목 키워드 필터 (선택)",
-            placeholder="비워두면 전체 영상 수집",
-            help="입력 시 해당 단어가 제목에 포함된 영상만 표시합니다",
-            key="ch_keyword"
-        )
-        channel_input = ""  # 단일 채널 입력 비활성화
+        if channel_search_mode == "탭 수집 (전체 영상)":
+            st.subheader("📅 수집 탭")
+            channel_tab = st.selectbox(
+                "채널 페이지 탭",
+                options=["동영상", "쇼츠"],
+                help="동영상: 일반 영상 탭 / 쇼츠: 쇼츠 탭"
+            )
+            keyword = st.text_input(
+                "🔍 제목 키워드 필터 (선택)",
+                placeholder="비워두면 전체 영상 수집",
+                help="입력 시 해당 단어가 제목에 포함된 영상만 표시합니다",
+                key="ch_keyword"
+            )
+        else:
+            channel_tab = "동영상"
+            keyword = st.text_input(
+                "🔍 채널 내 검색 키워드 (필수)",
+                placeholder="예: 레시피, 브이로그...",
+                help="채널 내에서 이 키워드로 검색합니다",
+                key="ch_search_keyword"
+            )
+
+        channel_input = ""
 
     st.divider()
 
-    # ── 콘텐츠 유형 ─────────────────────────────────────
     st.subheader("🩳 콘텐츠 유형")
     content_type = st.radio(
         "수집할 영상 유형",
@@ -209,7 +212,6 @@ with st.sidebar:
 
     st.divider()
 
-    # ── 업로드 시간 필터 (키워드 검색 전용) ────────────────
     if search_mode == "키워드 검색":
         st.subheader("📅 업로드 시간 필터")
         upload_filter = st.selectbox(
@@ -221,7 +223,6 @@ with st.sidebar:
 
     st.divider()
 
-    # ── 조회수 필터 ─────────────────────────────────────
     st.subheader("👁️ 조회수 필터")
     use_view_filter = st.checkbox("최소 조회수 필터 사용")
     min_view = 0
@@ -257,10 +258,6 @@ def date_to_days(date_str: str) -> int:
 
 
 def parse_view_count(view_str: str) -> int:
-    """
-    조회수 문자열 → 정수 변환.
-    입력 예: '1.2만', '35만', '1,234,567', '3억', '1000'
-    """
     if not view_str:
         return 0
     s = view_str.strip()
@@ -288,11 +285,6 @@ def parse_view_count(view_str: str) -> int:
 
 
 def is_shorts(link: str, title: str = "") -> bool:
-    """
-    쇼츠 여부 판별:
-    1. URL에 /shorts/ 포함
-    2. 제목에 #shorts 태그 포함 (대소문자 무관)
-    """
     if '/shorts/' in link:
         return True
     if '#shorts' in title.lower() or '#short' in title.lower():
@@ -322,14 +314,15 @@ def get_driver():
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
-    options.add_argument('--headless')          # 클라우드 환경 필수
+    options.add_argument('--headless')
     options.add_argument('--window-size=1920,1080')
     options.add_argument('--disable-setuid-sandbox')
     options.add_argument('--remote-debugging-port=9222')
+    options.add_argument('--lang=ko-KR')
+    options.add_argument('--accept-lang=ko-KR,ko;q=0.9')
 
-    # Streamlit Cloud: apt로 설치된 chromium-driver 우선 사용
     chromium_paths = [
-        '/usr/bin/chromedriver',          # Streamlit Cloud (apt)
+        '/usr/bin/chromedriver',
         '/usr/lib/chromium-browser/chromedriver',
         shutil.which('chromedriver') or '',
     ]
@@ -344,12 +337,10 @@ def get_driver():
     binary_path = next((p for p in chromium_bin_paths if p and os.path.exists(p)), None)
 
     if driver_path:
-        # 클라우드 환경: 시스템 chromedriver 사용
         if binary_path:
             options.binary_location = binary_path
         service = Service(driver_path)
     else:
-        # 로컬 환경: webdriver-manager 자동 설치
         service = Service(ChromeDriverManager().install())
 
     return webdriver.Chrome(service=service, options=options)
@@ -357,7 +348,6 @@ def get_driver():
 
 # ── ytInitialData JSON 추출 ──────────────────────────
 def _extract_yt_initial_data(html: str) -> dict:
-    """페이지 HTML에서 ytInitialData JSON 객체를 추출합니다."""
     patterns = [
         r'var ytInitialData\s*=\s*(\{.*?\});\s*</script>',
         r'window\["ytInitialData"\]\s*=\s*(\{.*?\});',
@@ -374,7 +364,6 @@ def _extract_yt_initial_data(html: str) -> dict:
 
 
 def _safe_get(obj, *keys, default=''):
-    """중첩 dict/list를 안전하게 탐색합니다."""
     for key in keys:
         if obj is None:
             return default
@@ -388,14 +377,9 @@ def _safe_get(obj, *keys, default=''):
 
 
 def _parse_video_renderer(renderer: dict):
-    """
-    videoRenderer / gridVideoRenderer / reelItemRenderer 등
-    다양한 renderer 타입에서 공통 필드를 추출합니다.
-    """
     if not isinstance(renderer, dict):
         return None
 
-    # ── videoId 추출 (위치가 타입마다 다름) ──────────────
     video_id = (
         renderer.get('videoId') or
         _safe_get(renderer, 'navigationEndpoint', 'watchEndpoint', 'videoId') or
@@ -406,7 +390,6 @@ def _parse_video_renderer(renderer: dict):
     if not video_id:
         return None
 
-    # ── 제목 ─────────────────────────────────────────────
     title = (
         _safe_get(renderer, 'title', 'runs', 0, 'text') or
         _safe_get(renderer, 'title', 'simpleText') or
@@ -416,7 +399,6 @@ def _parse_video_renderer(renderer: dict):
         ''
     )
 
-    # ── 조회수 ───────────────────────────────────────────
     view_raw = (
         _safe_get(renderer, 'viewCountText', 'simpleText') or
         _safe_get(renderer, 'viewCountText', 'runs', 0, 'text') or
@@ -426,7 +408,6 @@ def _parse_video_renderer(renderer: dict):
         ''
     )
 
-    # ── 업로드 날짜 ───────────────────────────────────────
     date_raw = (
         _safe_get(renderer, 'publishedTimeText', 'simpleText') or
         _safe_get(renderer, 'publishedTimeText', 'runs', 0, 'text') or
@@ -444,23 +425,11 @@ def _parse_video_renderer(renderer: dict):
 
 
 def _parse_lockup_view_model(lvm: dict):
-    """
-    최신 YouTube 채널탭의 lockupViewModel 구조에서 영상 정보를 추출합니다.
-    richItemRenderer > content > lockupViewModel
-    구조 예시:
-      contentId: videoId
-      title: {content: '제목'}
-      metadata: {lockupMetadataViewModel: {metadata: {contentMetadataViewModel:
-                   {metadataRows: [{metadataParts: [{text: {content:'조회수...'}}]}]}}}}
-      contentImage: {thumbnailViewModel: {image: {sources: [{url:'https://i.ytimg.com/vi/{id}/...'}]}}}
-    """
     if not isinstance(lvm, dict):
         return None
 
-    # ── videoId: contentId 또는 썸네일 URL에서 추출 ──────
     video_id = lvm.get('contentId', '')
     if not video_id:
-        # 썸네일 URL에서 파싱
         try:
             sources = lvm['contentImage']['thumbnailViewModel']['image']['sources']
             url = sources[0].get('url', '') if sources else ''
@@ -472,7 +441,6 @@ def _parse_lockup_view_model(lvm: dict):
     if not video_id:
         return None
 
-    # ── 제목 ─────────────────────────────────────────────
     title = (
         _safe_get(lvm, 'metadata', 'lockupMetadataViewModel', 'title', 'content') or
         _safe_get(lvm, 'title', 'content') or
@@ -480,25 +448,18 @@ def _parse_lockup_view_model(lvm: dict):
         ''
     )
 
-    # ── 메타데이터 rows에서 조회수·날짜 파싱 ─────────────
     view_raw = ''
     date_raw = ''
     try:
         lmvm = lvm.get('metadata', {}).get('lockupMetadataViewModel', {})
-
-        # 경로1: metadata > contentMetadataViewModel > metadataRows
         cmvm = lmvm.get('metadata', {}).get('contentMetadataViewModel', {})
         rows_data = cmvm.get('metadataRows', [])
-
-        # 경로2: 직접 metadataRows가 lmvm 안에 있는 경우
         if not rows_data:
             rows_data = lmvm.get('metadataRows', [])
 
-        # 모든 텍스트 수집
         all_texts = []
         for row in rows_data:
             for part in row.get('metadataParts', []):
-                # text 객체의 다양한 키 시도
                 txt = (
                     _safe_get(part, 'text', 'content') or
                     _safe_get(part, 'text', 'simpleText') or
@@ -508,7 +469,6 @@ def _parse_lockup_view_model(lvm: dict):
                 if txt:
                     all_texts.append(txt.strip())
 
-        # 분류: 조회수 vs 날짜
         for txt in all_texts:
             if not view_raw and (
                 '조회수' in txt or
@@ -525,8 +485,6 @@ def _parse_lockup_view_model(lvm: dict):
     except Exception:
         pass
 
-    # ── 최후 수단: accessibilityText에서 조회수/날짜 파싱 ──
-    # accessibilityText 예: "영상 제목 조회수 12만회 3일 전"
     if not view_raw or not date_raw:
         acc = lvm.get('accessibilityText', '')
         if acc:
@@ -548,7 +506,6 @@ def _parse_lockup_view_model(lvm: dict):
 
 
 def _walk_renderers(obj, key='videoRenderer', results=None):
-    """중첩 JSON에서 key에 해당하는 모든 renderer를 재귀 탐색합니다."""
     if results is None:
         results = []
     if isinstance(obj, dict):
@@ -562,6 +519,85 @@ def _walk_renderers(obj, key='videoRenderer', results=None):
     return results
 
 
+def _parse_all_renderers_from_data(data: dict) -> list:
+    """ytInitialData에서 모든 renderer 타입을 통합 파싱합니다."""
+    rows = []
+
+    # richItemRenderer (채널 동영상탭 신형)
+    rich_items = _walk_renderers(data, 'richItemRenderer')
+    for ri in rich_items:
+        inner_obj = ri.get('content') if isinstance(ri, dict) and 'content' in ri else ri
+        if not isinstance(inner_obj, dict):
+            continue
+
+        handled = False
+        for inner_key in ('videoRenderer', 'gridVideoRenderer',
+                          'reelItemRenderer', 'shortsLockupViewModel'):
+            inner_list = _walk_renderers(inner_obj, inner_key)
+            if inner_list:
+                handled = True
+            for vr in inner_list:
+                parsed = _parse_video_renderer(vr)
+                if parsed:
+                    rows.append(parsed)
+
+        lvm = inner_obj.get('lockupViewModel')
+        if lvm and not handled:
+            parsed = _parse_lockup_view_model(lvm)
+            if parsed:
+                rows.append(parsed)
+
+    # gridVideoRenderer (구형)
+    for vr in _walk_renderers(data, 'gridVideoRenderer'):
+        parsed = _parse_video_renderer(vr)
+        if parsed:
+            rows.append(parsed)
+
+    # videoRenderer (검색결과·채널 검색탭)
+    for vr in _walk_renderers(data, 'videoRenderer'):
+        parsed = _parse_video_renderer(vr)
+        if parsed:
+            rows.append(parsed)
+
+    # reelItemRenderer (쇼츠탭)
+    for vr in _walk_renderers(data, 'reelItemRenderer'):
+        parsed = _parse_video_renderer(vr)
+        if parsed:
+            rows.append(parsed)
+
+    # shortsLockupViewModel (최신 쇼츠)
+    for vr in _walk_renderers(data, 'shortsLockupViewModel'):
+        vid = (
+            _safe_get(vr, 'onTap', 'innertubeCommand', 'reelWatchEndpoint', 'videoId') or
+            _safe_get(vr, 'entityId') or ''
+        )
+        if vid.startswith('shorts-shelf-item-'):
+            vid = vid.replace('shorts-shelf-item-', '')
+        title = (
+            _safe_get(vr, 'overlayMetadata', 'primaryText', 'content') or
+            _safe_get(vr, 'accessibilityText') or ''
+        )
+        view_raw = _safe_get(vr, 'overlayMetadata', 'secondaryText', 'content') or ''
+        if vid:
+            rows.append({
+                'title':       str(title).strip(),
+                'link':        f'https://www.youtube.com/watch?v={vid}',
+                'view':        _extract_view(str(view_raw)),
+                'upload_date': '',
+            })
+
+    # 중복 제거
+    seen = set()
+    unique = []
+    for r in rows:
+        vid = r['link'].split('v=')[-1].split('&')[0]
+        if vid and vid not in seen:
+            seen.add(vid)
+            unique.append(r)
+
+    return unique
+
+
 # ── 키워드 검색 스크래퍼 ───────────────────────────────
 def scrape_keyword(keyword: str, upload_filter: str) -> pd.DataFrame:
     SEARCH_KEYWORD = keyword.replace(' ', '+')
@@ -571,7 +607,6 @@ def scrape_keyword(keyword: str, upload_filter: str) -> pd.DataFrame:
     URL = f"https://www.youtube.com/results?search_query={SEARCH_KEYWORD}{url_param}"
     driver.get(URL)
 
-    # JS 렌더링 완료 대기 (ytInitialData가 스크립트에 삽입될 때까지)
     try:
         WebDriverWait(driver, 15).until(
             lambda d: 'ytInitialData' in d.page_source
@@ -584,35 +619,94 @@ def scrape_keyword(keyword: str, upload_filter: str) -> pd.DataFrame:
     html_source = driver.page_source
     driver.quit()
 
-    # ytInitialData JSON 파싱 시도
     data = _extract_yt_initial_data(html_source)
     if data:
-        rows = []
-        for vr in _walk_renderers(data, 'videoRenderer'):
-            parsed = _parse_video_renderer(vr)
-            if parsed:
-                rows.append(parsed)
+        rows = _parse_all_renderers_from_data(data)
         if rows:
             return _rows_to_df(rows)
 
-    # fallback: BeautifulSoup DOM 파싱
     soup = BeautifulSoup(html_source, 'html.parser')
     return _parse_search_results(soup)
 
 
-# ── 단일 채널 스크래퍼 ───────────────────────────────
+# ── ★ 핵심 수정: 채널 내 키워드 검색 ─────────────────────
+def scrape_channel_search(channel_url: str, search_keyword: str,
+                          channel_name: str = "") -> pd.DataFrame:
+    """
+    채널 내에서 키워드로 검색합니다.
+    URL 패턴: https://www.youtube.com/@채널명/search?query=키워드
+    """
+    # 기본 채널 URL에서 탭 경로 제거
+    base_url = channel_url.rstrip('/')
+    for suffix in ['/videos', '/shorts', '/streams', '/featured', '/playlists', '/about', '/search']:
+        if base_url.endswith(suffix):
+            base_url = base_url[:-len(suffix)]
+            break
+
+    encoded_keyword = search_keyword.replace(' ', '+')
+    search_url = f"{base_url}/search?query={encoded_keyword}"
+
+    driver = get_driver()
+    rows = []
+
+    try:
+        driver.get(search_url)
+
+        try:
+            WebDriverWait(driver, 20).until(
+                lambda d: 'ytInitialData' in d.page_source
+            )
+        except Exception:
+            pass
+        time.sleep(3)
+
+        # 동의 팝업 처리
+        try:
+            btn = WebDriverWait(driver, 4).until(
+                EC.element_to_be_clickable(
+                    (By.XPATH, "//button[contains(., 'Accept') or contains(., '동의') or contains(., '동의합니다')]")
+                )
+            )
+            btn.click()
+            time.sleep(1)
+        except Exception:
+            pass
+
+        scroll(driver)
+        html_source = driver.page_source
+
+    finally:
+        driver.quit()
+
+    # ytInitialData 파싱
+    data = _extract_yt_initial_data(html_source)
+    if data:
+        rows = _parse_all_renderers_from_data(data)
+
+    # DOM fallback
+    if not rows:
+        soup = BeautifulSoup(html_source, 'html.parser')
+        df_fallback = _parse_search_results(soup)
+        if not df_fallback.empty:
+            if channel_name:
+                df_fallback['channel'] = channel_name
+            return df_fallback
+
+    df = _rows_to_df(rows)
+    if channel_name:
+        df['channel'] = channel_name
+
+    return df
+
+
+# ── 단일 채널 탭 스크래퍼 ────────────────────────────────
 def scrape_channel(channel_url: str, tab: str = "동영상",
                    channel_name: str = "") -> pd.DataFrame:
-    """
-    채널 탭(동영상/쇼츠)에서 영상 목록을 수집합니다.
-    ytInitialData JSON을 우선 파싱하고, 실패 시 DOM 파싱 fallback.
-    """
     tab_map = {"동영상": "/videos", "쇼츠": "/shorts"}
     tab_suffix = tab_map.get(tab, "/videos")
 
-    # URL 정규화: 기존 탭 경로 제거 후 원하는 탭 추가
     base_url = channel_url.rstrip('/')
-    for suffix in ['/videos', '/shorts', '/streams', '/featured', '/playlists', '/about']:
+    for suffix in ['/videos', '/shorts', '/streams', '/featured', '/playlists', '/about', '/search']:
         if base_url.endswith(suffix):
             base_url = base_url[:-len(suffix)]
             break
@@ -622,7 +716,6 @@ def scrape_channel(channel_url: str, tab: str = "동영상",
     try:
         driver.get(target_url)
 
-        # ytInitialData 삽입 대기
         try:
             WebDriverWait(driver, 20).until(
                 lambda d: 'ytInitialData' in d.page_source
@@ -631,7 +724,6 @@ def scrape_channel(channel_url: str, tab: str = "동영상",
             pass
         time.sleep(3)
 
-        # 쿠키/동의 팝업 처리
         try:
             btn = WebDriverWait(driver, 4).until(
                 EC.element_to_be_clickable(
@@ -649,156 +741,37 @@ def scrape_channel(channel_url: str, tab: str = "동영상",
         driver.quit()
 
     rows = []
-
-    # ── 방법 1: ytInitialData JSON 파싱 ─────────────────
     data = _extract_yt_initial_data(html_source)
-    debug_info = {}
 
     if data:
-        found_keys = []
+        rows = _parse_all_renderers_from_data(data)
 
-        # ── richItemRenderer: 채널 동영상탭 신형 구조 ──────
-        rich_items = _walk_renderers(data, 'richItemRenderer')
-        if rich_items:
-            found_keys.append(f"richItemRenderer({len(rich_items)})")
-            for ri in rich_items:
-                inner_obj = ri.get('content') if isinstance(ri, dict) and 'content' in ri else ri
-                if not isinstance(inner_obj, dict):
-                    continue
-
-                # 방법A: 기존 videoRenderer 계열
-                handled = False
-                for inner_key in ('videoRenderer', 'gridVideoRenderer',
-                                  'reelItemRenderer', 'shortsLockupViewModel'):
-                    inner_list = _walk_renderers(inner_obj, inner_key)
-                    if inner_list:
-                        found_keys.append(f"  └{inner_key}({len(inner_list)})")
-                        handled = True
-                    for vr in inner_list:
-                        parsed = _parse_video_renderer(vr)
-                        if parsed:
-                            rows.append(parsed)
-
-                # 방법B: 최신 YouTube — lockupViewModel 구조
-                # richItemRenderer > content > lockupViewModel
-                lvm = inner_obj.get('lockupViewModel')
-                if lvm and not handled:
-                    found_keys.append("  └lockupViewModel")
-                    parsed = _parse_lockup_view_model(lvm)
-                    if parsed:
-                        rows.append(parsed)
-
-        # ── gridVideoRenderer: 채널 동영상탭 구형 ──────────
-        grid_items = _walk_renderers(data, 'gridVideoRenderer')
-        if grid_items:
-            found_keys.append(f"gridVideoRenderer({len(grid_items)})")
-            for vr in grid_items:
-                parsed = _parse_video_renderer(vr)
-                if parsed:
-                    rows.append(parsed)
-
-        # ── videoRenderer: 검색결과·일부 채널탭 ────────────
-        video_items = _walk_renderers(data, 'videoRenderer')
-        if video_items:
-            found_keys.append(f"videoRenderer({len(video_items)})")
-            for vr in video_items:
-                parsed = _parse_video_renderer(vr)
-                if parsed:
-                    rows.append(parsed)
-
-        # ── reelItemRenderer: 쇼츠탭 ───────────────────────
-        reel_items = _walk_renderers(data, 'reelItemRenderer')
-        if reel_items:
-            found_keys.append(f"reelItemRenderer({len(reel_items)})")
-            for vr in reel_items:
-                parsed = _parse_video_renderer(vr)
-                if parsed:
-                    rows.append(parsed)
-
-        # ── shortsLockupViewModel: 최신 쇼츠 구조 ──────────
-        shorts_items = _walk_renderers(data, 'shortsLockupViewModel')
-        if shorts_items:
-            found_keys.append(f"shortsLockupViewModel({len(shorts_items)})")
-            for vr in shorts_items:
-                vid = (
-                    _safe_get(vr, 'onTap', 'innertubeCommand', 'reelWatchEndpoint', 'videoId') or
-                    _safe_get(vr, 'entityId') or ''
-                )
-                if vid.startswith('shorts-shelf-item-'):
-                    vid = vid.replace('shorts-shelf-item-', '')
-                title = (
-                    _safe_get(vr, 'overlayMetadata', 'primaryText', 'content') or
-                    _safe_get(vr, 'accessibilityText') or ''
-                )
-                view_raw = _safe_get(vr, 'overlayMetadata', 'secondaryText', 'content') or ''
-                if vid:
-                    rows.append({
-                        'title':       str(title).strip(),
-                        'link':        f'https://www.youtube.com/watch?v={vid}',
-                        'view':        _extract_view(str(view_raw)),
-                        'upload_date': '',
-                    })
-
-        debug_info['found_keys'] = found_keys
-        debug_info['data_top_keys'] = list(data.keys())[:10]
-        # 첫 번째 rich_item의 content 구조를 깊게 저장
-        if rich_items:
-            first_ri = rich_items[0] if isinstance(rich_items[0], dict) else {}
-            inner = first_ri.get('content', first_ri)
-            lvm_sample = inner.get('lockupViewModel', {})
-            lmvm_sample = lvm_sample.get('metadata', {}).get('lockupMetadataViewModel', {})
-            cmvm_sample = lmvm_sample.get('metadata', {}).get('contentMetadataViewModel', {})
-            debug_info['lvm_keys'] = list(lvm_sample.keys())[:10]
-            debug_info['lmvm_keys'] = list(lmvm_sample.keys())[:10]
-            debug_info['metadataRows_sample'] = str(cmvm_sample.get('metadataRows', []))[:800]
-            debug_info['all_lmvm_meta'] = str(lmvm_sample.get('metadata', {}))[:400]
-
-    debug_info['html_len'] = len(html_source)
-    debug_info['has_ytInitialData'] = 'ytInitialData' in html_source
-    debug_info['rows_before_dedup'] = len(rows)
-
-    # 중복 제거 (video_id 기준)
-    seen = set()
-    unique_rows = []
-    for r in rows:
-        vid = r['link'].split('v=')[-1].split('&')[0]
-        if vid and vid not in seen:
-            seen.add(vid)
-            unique_rows.append(r)
-    rows = unique_rows
-    debug_info['rows_after_dedup'] = len(rows)
-
-    # ── 방법 2: BeautifulSoup DOM fallback ──────────────
     if not rows:
         soup = BeautifulSoup(html_source, 'html.parser')
         df_fallback = _parse_channel_results(soup)
-        debug_info['fallback_rows'] = len(df_fallback)
         if not df_fallback.empty:
             if channel_name:
                 df_fallback['channel'] = channel_name
-            df_fallback['_debug'] = str(debug_info)
             return df_fallback
 
     df = _rows_to_df(rows)
     if channel_name:
         df['channel'] = channel_name
 
-    # 디버그 정보를 session_state에 저장 (UI에서 확인 가능)
     if 'scrape_debug' not in st.session_state:
         st.session_state.scrape_debug = {}
-    st.session_state.scrape_debug[channel_name or channel_url] = debug_info
+    st.session_state.scrape_debug[channel_name or channel_url] = {
+        'rows': len(rows),
+        'url': target_url,
+    }
 
     return df
 
 
-# ── 다중 채널 수집 ────────────────────────────────────
+# ── 다중 채널 수집 (탭 수집) ──────────────────────────────
 def scrape_multiple_channels(channel_urls: list, channel_names: list,
                              tab: str = "동영상",
                              progress_cb=None) -> pd.DataFrame:
-    """
-    여러 채널을 순차적으로 수집해 하나의 DataFrame으로 합칩니다.
-    progress_cb: (current, total, channel_name) → None
-    """
     all_dfs = []
     total = len(channel_urls)
     for i, (url, name) in enumerate(zip(channel_urls, channel_names)):
@@ -810,7 +783,6 @@ def scrape_multiple_channels(channel_urls: list, channel_names: list,
                 all_dfs.append(df)
         except Exception as e:
             st.warning(f"⚠️ '{name}' 수집 실패: {e}")
-        # 채널 간 요청 간격 (봇 감지 방지)
         if i < total - 1:
             time.sleep(random.uniform(2, 4))
 
@@ -820,14 +792,46 @@ def scrape_multiple_channels(channel_urls: list, channel_names: list,
         return df_empty
 
     result = pd.concat(all_dfs, ignore_index=True)
-    # 중복 링크 제거
+    result = result.drop_duplicates(subset=['link']).reset_index(drop=True)
+    return result
+
+
+# ── ★ 핵심 수정: 다중 채널 내 키워드 검색 ─────────────────
+def scrape_multiple_channels_search(channel_urls: list, channel_names: list,
+                                    search_keyword: str,
+                                    progress_cb=None) -> pd.DataFrame:
+    """
+    여러 채널에서 키워드로 각각 검색하여 결과를 합칩니다.
+    """
+    all_dfs = []
+    total = len(channel_urls)
+    for i, (url, name) in enumerate(zip(channel_urls, channel_names)):
+        if progress_cb:
+            progress_cb(i, total, name)
+        try:
+            df = scrape_channel_search(url, search_keyword, channel_name=name)
+            if not df.empty:
+                all_dfs.append(df)
+                st.info(f"✅ '{name}': {len(df)}개 영상 수집")
+            else:
+                st.warning(f"⚠️ '{name}': 검색 결과 없음")
+        except Exception as e:
+            st.warning(f"⚠️ '{name}' 검색 실패: {e}")
+        if i < total - 1:
+            time.sleep(random.uniform(2, 4))
+
+    if not all_dfs:
+        df_empty = _empty_df()
+        df_empty['channel'] = ''
+        return df_empty
+
+    result = pd.concat(all_dfs, ignore_index=True)
     result = result.drop_duplicates(subset=['link']).reset_index(drop=True)
     return result
 
 
 # ── HTML 파싱: 검색 결과 ──────────────────────────────
 def _parse_search_results(soup: BeautifulSoup) -> pd.DataFrame:
-    # 각 renderer에서 제목/링크/메타를 직접 추출 → 순서 어긋남 방지
     renderers = soup.find_all('ytd-video-renderer')
     titles, links, views, dates = [], [], [], []
     for renderer in renderers:
@@ -843,22 +847,14 @@ def _parse_search_results(soup: BeautifulSoup) -> pd.DataFrame:
     return _build_df(titles, links, views, dates)
 
 
-# ── HTML 파싱: 채널 결과 ──────────────────────────────
 def _parse_channel_results(soup: BeautifulSoup) -> pd.DataFrame:
-    """
-    채널 페이지(동영상/쇼츠 탭) 파싱.
-    ytd-rich-item-renderer 또는 ytd-grid-video-renderer 기준.
-    """
     titles, links, views, dates = [], [], [], []
 
-    # 방법 1: rich-item-renderer (메인 채널 페이지)
     items = soup.find_all('ytd-rich-item-renderer')
     if not items:
-        # 방법 2: grid-video-renderer (구형 레이아웃)
         items = soup.find_all('ytd-grid-video-renderer')
 
     for item in items:
-        # 제목 + 링크
         a_tag = item.find('a', id='video-title-link') or item.find('a', id='thumbnail')
         title_tag = item.find('yt-formatted-string', id='video-title') or \
                     item.find('span', id='video-title')
@@ -869,11 +865,9 @@ def _parse_channel_results(soup: BeautifulSoup) -> pd.DataFrame:
         if not link:
             continue
 
-        # 조회수 & 날짜
         meta_block = item.find(class_='style-scope ytd-video-meta-block')
         raw = meta_block.get_text(separator='|').strip() if meta_block else ""
 
-        # 쇼츠 탭은 조회수/날짜가 다른 요소에 있을 수 있음
         view_spans = item.find_all('span', class_=lambda c: c and 'ytd-grid-video-renderer' in c)
         if not raw:
             raw = '|'.join(s.get_text(strip=True) for s in view_spans)
@@ -883,7 +877,6 @@ def _parse_channel_results(soup: BeautifulSoup) -> pd.DataFrame:
         views.append(_extract_view(raw))
         dates.append(_extract_date(raw))
 
-    # fallback: 검색 파서로 재시도
     if not titles:
         return _parse_search_results(soup)
 
@@ -892,32 +885,22 @@ def _parse_channel_results(soup: BeautifulSoup) -> pd.DataFrame:
 
 # ── 공통 파싱 헬퍼 ────────────────────────────────────
 def _extract_view(text: str) -> str:
-    """
-    조회수 문자열 추출.
-    ytInitialData 및 DOM 텍스트 모두 처리.
-    예: '조회수 1,234,567회', '1.2만회', '35만', '1.2천', '1234567'
-    """
     if not text:
         return ''
     text = re.sub(r'[•\n\r]', '|', text)
 
-    # 1순위: '조회수 N만회', '조회수 N,NNN회' 등 — 가장 명확한 패턴
     m = re.search(r'조회수\s*([\d.,]+\s*(?:[만천억])?)', text)
     if m:
-        # '회' 같은 후위 접미사 제거
         return re.sub(r'[회\s]', '', m.group(1)).strip()
 
-    # 2순위: 단위 포함 숫자 (예: '35만회', '1.2천', '3억')
     m = re.search(r'([\d.]+\s*[만천억])', text)
     if m:
         return re.sub(r'[\s]', '', m.group(1)).strip()
 
-    # 3순위: 쉼표 포함 순수 숫자 (예: '1,234,567')
     m = re.search(r'(\d{1,3}(?:,\d{3})+)', text)
     if m:
         return m.group(1).strip()
 
-    # 4순위: 5자리 이상 연속 숫자 (날짜 숫자 오탐 방지)
     m = re.search(r'(\d{5,})', text)
     if m:
         return m.group(1).strip()
@@ -933,7 +916,6 @@ def _extract_date(text: str) -> str:
 
 
 def _empty_df() -> pd.DataFrame:
-    """항상 올바른 컬럼 구조를 가진 빈 DataFrame 반환."""
     return pd.DataFrame(columns=[
         'title', 'link', 'view', 'upload_date',
         'view_num', 'days_ago', 'is_shorts'
@@ -959,13 +941,10 @@ def _build_df(titles, links, views, dates) -> pd.DataFrame:
     return df
 
 
-
 def _rows_to_df(rows: list) -> pd.DataFrame:
-    """_parse_video_renderer 결과 list → DataFrame 변환."""
     if not rows:
         return _empty_df()
 
-    # 각 row가 dict이고 필수 키를 가지도록 보장
     clean_rows = []
     for r in rows:
         if not isinstance(r, dict):
@@ -996,7 +975,7 @@ def filter_content_type(df: pd.DataFrame, content_type: str) -> pd.DataFrame:
         return df[~df['is_shorts']].copy()
     elif content_type == "쇼츠만":
         return df[df['is_shorts']].copy()
-    return df.copy()  # 전체
+    return df.copy()
 
 
 # ── AI 키워드 추천 ────────────────────────────────────
@@ -1047,7 +1026,6 @@ def render_results():
     total_collected = st.session_state.total_collected
     filtered_count = st.session_state.filtered_count
 
-    # 요약 카드
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("📦 전체 수집", f"{total_collected}개")
     col2.metric("✅ 필터 후",  f"{filtered_count}개")
@@ -1059,7 +1037,6 @@ def render_results():
         st.warning("⚠️ 필터 조건에 맞는 영상이 없습니다. 조건을 완화해 보세요.")
         return
 
-    # ── 필터/정렬 위젯을 탭 바깥에 배치 (탭 전환 시 상태 유지) ──
     st.markdown("---")
     st.markdown("#### 🔧 필터 및 정렬")
 
@@ -1081,7 +1058,6 @@ def render_results():
             key="in_tab_type"
         )
 
-    # 조회수 범위 슬라이더
     view_min_all = int(df['view_num'].min())
     view_max_all = int(df['view_num'].max())
 
@@ -1102,7 +1078,6 @@ def render_results():
         else:
             view_lo, view_hi = view_min_all, view_max_all
 
-    # ── 필터/정렬 적용 ────────────────────────────────
     df_sorted = df.copy()
     df_sorted = df_sorted[
         (df_sorted['view_num'] >= view_lo) &
@@ -1119,7 +1094,6 @@ def render_results():
                 unsafe_allow_html=True)
     st.markdown("---")
 
-    # ── 탭: 목록 / AI 추천 ────────────────────────────
     tab1, tab2 = st.tabs(["📊 수집 결과", "🤖 AI 키워드 추천"])
 
     with tab1:
@@ -1132,7 +1106,6 @@ def render_results():
                 lambda x: "🩳 쇼츠" if x else "🎬 일반"
             )
             df_display = df_display.rename(columns={'is_shorts': '유형'})
-            # 채널명 컬럼 앞으로 이동
             if 'channel' in df_display.columns:
                 cols = ['channel', 'title', '유형', 'view', 'upload_date', 'link']
                 df_display = df_display[[c for c in cols if c in df_display.columns]]
@@ -1195,6 +1168,12 @@ if run_btn:
     elif search_mode == "채널 검색" and not st.session_state.selected_channels:
         st.warning("⚠️ 수집할 채널을 1개 이상 선택해주세요!")
 
+    # ── ★ 채널 내 키워드 검색 모드에서 키워드 미입력 체크
+    elif (search_mode == "채널 검색" and
+          st.session_state.get("channel_search_mode") == "키워드로 채널 내 검색" and
+          not keyword):
+        st.warning("⚠️ 채널 내 검색할 키워드를 입력해주세요!")
+
     else:
         try:
             if search_mode == "키워드 검색":
@@ -1202,11 +1181,9 @@ if run_btn:
                     df = scrape_keyword(keyword, upload_filter)
 
             else:
-                # 선택된 채널 URL & 이름 매핑
                 sel_urls  = st.session_state.selected_channels
                 name_map  = {c['url']: c['name'] for c in st.session_state.channel_list}
                 sel_names = [name_map.get(u, u) for u in sel_urls]
-                tab_sel   = channel_tab if content_type != "쇼츠만" else "쇼츠"
 
                 prog_bar  = st.progress(0, text="채널 수집 준비 중...")
                 status_tx = st.empty()
@@ -1216,11 +1193,26 @@ if run_btn:
                     prog_bar.progress(pct, text=f"({i+1}/{total}) '{name}' 수집 중...")
                     status_tx.info(f"🔄 **{name}** 채널 크롤링 중...")
 
-                df = scrape_multiple_channels(
-                    sel_urls, sel_names,
-                    tab=tab_sel,
-                    progress_cb=progress_cb
-                )
+                # ── ★ 검색 방식에 따라 분기 ──────────────────
+                ch_mode = st.session_state.get("channel_search_mode", "탭 수집 (전체 영상)")
+
+                if ch_mode == "키워드로 채널 내 검색":
+                    # 채널 내 키워드 검색
+                    st.info(f"🔍 각 채널에서 **'{keyword}'** 키워드로 검색합니다.")
+                    df = scrape_multiple_channels_search(
+                        sel_urls, sel_names,
+                        search_keyword=keyword,
+                        progress_cb=progress_cb
+                    )
+                else:
+                    # 기존 탭 수집 방식
+                    tab_sel = channel_tab if content_type != "쇼츠만" else "쇼츠"
+                    df = scrape_multiple_channels(
+                        sel_urls, sel_names,
+                        tab=tab_sel,
+                        progress_cb=progress_cb
+                    )
+
                 prog_bar.progress(100, text="✅ 수집 완료!")
                 status_tx.empty()
 
@@ -1235,18 +1227,19 @@ if run_btn:
             # ── 콘텐츠 유형 필터 ──────────────────────
             df = filter_content_type(df, content_type)
 
-            # ── 제목 키워드 필터 (채널 검색) ──────────
-            if search_mode == "채널 검색" and keyword:
+            # ── 제목 키워드 필터 (탭 수집 모드에서만) ──
+            ch_mode = st.session_state.get("channel_search_mode", "탭 수집 (전체 영상)")
+            if (search_mode == "채널 검색" and
+                ch_mode == "탭 수집 (전체 영상)" and
+                keyword):
                 df = df[df['title'].str.contains(keyword, case=False, na=False)]
 
             # ── 조회수 필터 ───────────────────────────
             if use_view_filter and min_view > 0:
                 df = df[df['view_num'] >= min_view]
 
-            # ── 저장 ──────────────────────────────────
             if df.empty or 'title' not in df.columns:
                 st.warning("⚠️ 영상 데이터를 가져오지 못했습니다. 채널명/키워드를 확인하거나 잠시 후 다시 시도해주세요.")
-                # 디버그 정보 표시
                 if 'scrape_debug' in st.session_state and st.session_state.scrape_debug:
                     with st.expander("🔍 디버그 정보 (개발자용)"):
                         st.json(st.session_state.scrape_debug)
