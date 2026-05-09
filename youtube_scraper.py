@@ -472,30 +472,63 @@ def _parse_lockup_view_model(lvm: dict):
     )
 
     # ── 메타데이터 rows에서 조회수·날짜 파싱 ─────────────
-    # metadataRows[0] = 조회수 + 날짜, metadataRows[1] = 기타
     view_raw = ''
     date_raw = ''
     try:
-        rows_data = (
-            lvm['metadata']['lockupMetadataViewModel']
-               ['metadata']['contentMetadataViewModel']
-               ['metadataRows']
-        )
+        lmvm = lvm.get('metadata', {}).get('lockupMetadataViewModel', {})
+
+        # 경로1: metadata > contentMetadataViewModel > metadataRows
+        cmvm = lmvm.get('metadata', {}).get('contentMetadataViewModel', {})
+        rows_data = cmvm.get('metadataRows', [])
+
+        # 경로2: 직접 metadataRows가 lmvm 안에 있는 경우
+        if not rows_data:
+            rows_data = lmvm.get('metadataRows', [])
+
+        # 모든 텍스트 수집
+        all_texts = []
         for row in rows_data:
             for part in row.get('metadataParts', []):
-                text = (
+                # text 객체의 다양한 키 시도
+                txt = (
                     _safe_get(part, 'text', 'content') or
-                    _safe_get(part, 'text', 'simpleText') or ''
+                    _safe_get(part, 'text', 'simpleText') or
+                    _safe_get(part, 'text', 'runs', 0, 'text') or
+                    ''
                 )
-                if not text:
-                    continue
-                if not view_raw and ('조회수' in text or '만' in text or '천' in text or
-                                     re.search(r'\d{3,}', text)):
-                    view_raw = text
-                elif not date_raw and re.search(r'\d+\s*(?:분|시간|일|주|개월|년)\s*전', text):
-                    date_raw = text
+                if txt:
+                    all_texts.append(txt.strip())
+
+        # 분류: 조회수 vs 날짜
+        for txt in all_texts:
+            if not view_raw and (
+                '조회수' in txt or
+                re.search(r'[\d.]+\s*[만천억]', txt) or
+                re.search(r'\d{1,3}(?:,\d{3})+', txt) or
+                re.search(r'^\d{4,}$', txt)
+            ):
+                view_raw = txt
+            elif not date_raw and re.search(
+                r'\d+\s*(?:분|시간|일|주|개월|년)\s*전', txt
+            ):
+                date_raw = txt
+
     except Exception:
         pass
+
+    # ── 최후 수단: accessibilityText에서 조회수/날짜 파싱 ──
+    # accessibilityText 예: "영상 제목 조회수 12만회 3일 전"
+    if not view_raw or not date_raw:
+        acc = lvm.get('accessibilityText', '')
+        if acc:
+            if not view_raw:
+                m_v = re.search(r'조회수\s*([\d.,]+\s*(?:[만천억])?)', acc)
+                if m_v:
+                    view_raw = m_v.group(0)
+            if not date_raw:
+                m_d = re.search(r'\d+\s*(?:분|시간|일|주|개월|년)\s*전', acc)
+                if m_d:
+                    date_raw = m_d.group(0)
 
     return {
         'title':       str(title).strip(),
@@ -699,9 +732,17 @@ def scrape_channel(channel_url: str, tab: str = "동영상",
 
         debug_info['found_keys'] = found_keys
         debug_info['data_top_keys'] = list(data.keys())[:10]
-        debug_info['rich_item_sample'] = (
-            str(rich_items[0])[:500] if rich_items else 'none'
-        )
+        # 첫 번째 rich_item의 content 구조를 깊게 저장
+        if rich_items:
+            first_ri = rich_items[0] if isinstance(rich_items[0], dict) else {}
+            inner = first_ri.get('content', first_ri)
+            lvm_sample = inner.get('lockupViewModel', {})
+            lmvm_sample = lvm_sample.get('metadata', {}).get('lockupMetadataViewModel', {})
+            cmvm_sample = lmvm_sample.get('metadata', {}).get('contentMetadataViewModel', {})
+            debug_info['lvm_keys'] = list(lvm_sample.keys())[:10]
+            debug_info['lmvm_keys'] = list(lmvm_sample.keys())[:10]
+            debug_info['metadataRows_sample'] = str(cmvm_sample.get('metadataRows', []))[:800]
+            debug_info['all_lmvm_meta'] = str(lmvm_sample.get('metadata', {}))[:400]
 
     debug_info['html_len'] = len(html_source)
     debug_info['has_ytInitialData'] = 'ytInitialData' in html_source
