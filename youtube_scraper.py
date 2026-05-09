@@ -434,6 +434,77 @@ def _parse_video_renderer(renderer: dict):
     }
 
 
+def _parse_lockup_view_model(lvm: dict):
+    """
+    최신 YouTube 채널탭의 lockupViewModel 구조에서 영상 정보를 추출합니다.
+    richItemRenderer > content > lockupViewModel
+    구조 예시:
+      contentId: videoId
+      title: {content: '제목'}
+      metadata: {lockupMetadataViewModel: {metadata: {contentMetadataViewModel:
+                   {metadataRows: [{metadataParts: [{text: {content:'조회수...'}}]}]}}}}
+      contentImage: {thumbnailViewModel: {image: {sources: [{url:'https://i.ytimg.com/vi/{id}/...'}]}}}
+    """
+    if not isinstance(lvm, dict):
+        return None
+
+    # ── videoId: contentId 또는 썸네일 URL에서 추출 ──────
+    video_id = lvm.get('contentId', '')
+    if not video_id:
+        # 썸네일 URL에서 파싱
+        try:
+            sources = lvm['contentImage']['thumbnailViewModel']['image']['sources']
+            url = sources[0].get('url', '') if sources else ''
+            m = re.search(r'/vi/([a-zA-Z0-9_-]{11})/', url)
+            if m:
+                video_id = m.group(1)
+        except Exception:
+            pass
+    if not video_id:
+        return None
+
+    # ── 제목 ─────────────────────────────────────────────
+    title = (
+        _safe_get(lvm, 'metadata', 'lockupMetadataViewModel', 'title', 'content') or
+        _safe_get(lvm, 'title', 'content') or
+        _safe_get(lvm, 'accessibilityText') or
+        ''
+    )
+
+    # ── 메타데이터 rows에서 조회수·날짜 파싱 ─────────────
+    # metadataRows[0] = 조회수 + 날짜, metadataRows[1] = 기타
+    view_raw = ''
+    date_raw = ''
+    try:
+        rows_data = (
+            lvm['metadata']['lockupMetadataViewModel']
+               ['metadata']['contentMetadataViewModel']
+               ['metadataRows']
+        )
+        for row in rows_data:
+            for part in row.get('metadataParts', []):
+                text = (
+                    _safe_get(part, 'text', 'content') or
+                    _safe_get(part, 'text', 'simpleText') or ''
+                )
+                if not text:
+                    continue
+                if not view_raw and ('조회수' in text or '만' in text or '천' in text or
+                                     re.search(r'\d{3,}', text)):
+                    view_raw = text
+                elif not date_raw and re.search(r'\d+\s*(?:분|시간|일|주|개월|년)\s*전', text):
+                    date_raw = text
+    except Exception:
+        pass
+
+    return {
+        'title':       str(title).strip(),
+        'link':        f'https://www.youtube.com/watch?v={video_id}',
+        'view':        _extract_view(str(view_raw)),
+        'upload_date': str(date_raw).strip(),
+    }
+
+
 def _walk_renderers(obj, key='videoRenderer', results=None):
     """중첩 JSON에서 key에 해당하는 모든 renderer를 재귀 탐색합니다."""
     if results is None:
@@ -545,23 +616,35 @@ def scrape_channel(channel_url: str, tab: str = "동영상",
         found_keys = []
 
         # ── richItemRenderer: 채널 동영상탭 신형 구조 ──────
-        # richItemRenderer > content > videoRenderer (또는 reelItemRenderer 등)
         rich_items = _walk_renderers(data, 'richItemRenderer')
         if rich_items:
             found_keys.append(f"richItemRenderer({len(rich_items)})")
             for ri in rich_items:
-                # content 키가 있으면 그 안을 탐색, 없으면 ri 자체를 탐색
                 inner_obj = ri.get('content') if isinstance(ri, dict) and 'content' in ri else ri
-                # inner_obj 안의 모든 videoRenderer 계열 키 탐색
+                if not isinstance(inner_obj, dict):
+                    continue
+
+                # 방법A: 기존 videoRenderer 계열
+                handled = False
                 for inner_key in ('videoRenderer', 'gridVideoRenderer',
                                   'reelItemRenderer', 'shortsLockupViewModel'):
                     inner_list = _walk_renderers(inner_obj, inner_key)
                     if inner_list:
                         found_keys.append(f"  └{inner_key}({len(inner_list)})")
+                        handled = True
                     for vr in inner_list:
                         parsed = _parse_video_renderer(vr)
                         if parsed:
                             rows.append(parsed)
+
+                # 방법B: 최신 YouTube — lockupViewModel 구조
+                # richItemRenderer > content > lockupViewModel
+                lvm = inner_obj.get('lockupViewModel')
+                if lvm and not handled:
+                    found_keys.append("  └lockupViewModel")
+                    parsed = _parse_lockup_view_model(lvm)
+                    if parsed:
+                        rows.append(parsed)
 
         # ── gridVideoRenderer: 채널 동영상탭 구형 ──────────
         grid_items = _walk_renderers(data, 'gridVideoRenderer')
