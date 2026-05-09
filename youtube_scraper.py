@@ -289,7 +289,7 @@ def _safe_get(obj, *keys, default=''):
     return obj if obj is not None else default
 
 
-def _parse_video_renderer(renderer: dict) -> dict | None:
+def _parse_video_renderer(renderer: dict):
     """videoRenderer dict에서 제목/링크/조회수/날짜를 추출합니다."""
     video_id = _safe_get(renderer, 'videoId')
     if not video_id:
@@ -362,14 +362,13 @@ def scrape_keyword(keyword: str, upload_filter: str) -> pd.DataFrame:
     # ytInitialData JSON 파싱 시도
     data = _extract_yt_initial_data(html_source)
     if data:
-        renderers = _walk_renderers(data, 'videoRenderer')
-        rows = [r for vr in renderers if (r := _parse_video_renderer(vr))]
+        rows = []
+        for vr in _walk_renderers(data, 'videoRenderer'):
+            parsed = _parse_video_renderer(vr)
+            if parsed:
+                rows.append(parsed)
         if rows:
-            df = pd.DataFrame(rows)
-            df['view_num']  = df['view'].apply(parse_view_count)
-            df['days_ago']  = df['upload_date'].apply(date_to_days)
-            df['is_shorts'] = df.apply(lambda r: is_shorts(r['link'], r['title']), axis=1)
-            return df
+            return _rows_to_df(rows)
 
     # fallback: BeautifulSoup DOM 파싱
     soup = BeautifulSoup(html_source, 'html.parser')
@@ -420,16 +419,13 @@ def scrape_channel(channel_url: str, tab: str = "동영상") -> pd.DataFrame:
     # ytInitialData JSON 파싱 시도
     data = _extract_yt_initial_data(html_source)
     if data:
-        renderers = _walk_renderers(data, 'gridVideoRenderer') +                     _walk_renderers(data, 'richItemRenderer')
-        # richItemRenderer 안의 videoRenderer도 추출
-        video_renderers = _walk_renderers(data, 'videoRenderer')
-        rows = [r for vr in video_renderers if (r := _parse_video_renderer(vr))]
+        rows = []
+        for vr in _walk_renderers(data, 'videoRenderer'):
+            parsed = _parse_video_renderer(vr)
+            if parsed:
+                rows.append(parsed)
         if rows:
-            df = pd.DataFrame(rows)
-            df['view_num']  = df['view'].apply(parse_view_count)
-            df['days_ago']  = df['upload_date'].apply(date_to_days)
-            df['is_shorts'] = df.apply(lambda r: is_shorts(r['link'], r['title']), axis=1)
-            return df
+            return _rows_to_df(rows)
 
     # fallback: BeautifulSoup DOM 파싱
     soup = BeautifulSoup(html_source, 'html.parser')
@@ -553,8 +549,26 @@ def _build_df(titles, links, views, dates) -> pd.DataFrame:
     })
     df['view_num'] = df['view'].apply(parse_view_count)
     df['days_ago'] = df['upload_date'].apply(date_to_days)
-    # 쇼츠 여부 컬럼 추가
-    df['is_shorts'] = df.apply(lambda r: is_shorts(r['link'], r['title']), axis=1)
+    df['is_shorts'] = [
+        is_shorts(str(row['link']), str(row['title']))
+        for _, row in df.iterrows()
+    ]
+    return df
+
+
+def _rows_to_df(rows: list) -> pd.DataFrame:
+    """_parse_video_renderer 결과 list → DataFrame 변환."""
+    df = pd.DataFrame(rows)
+    # 필수 컬럼 보장
+    for col in ['title', 'link', 'view', 'upload_date']:
+        if col not in df.columns:
+            df[col] = ''
+    df['view_num'] = df['view'].apply(parse_view_count)
+    df['days_ago'] = df['upload_date'].apply(date_to_days)
+    df['is_shorts'] = [
+        is_shorts(str(row['link']), str(row['title']))
+        for _, row in df.iterrows()
+    ]
     return df
 
 
