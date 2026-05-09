@@ -257,6 +257,86 @@ def get_driver():
     return webdriver.Chrome(service=service, options=options)
 
 
+# ── ytInitialData JSON 추출 ──────────────────────────
+def _extract_yt_initial_data(html: str) -> dict:
+    """페이지 HTML에서 ytInitialData JSON 객체를 추출합니다."""
+    patterns = [
+        r'var ytInitialData\s*=\s*(\{.*?\});\s*</script>',
+        r'window\["ytInitialData"\]\s*=\s*(\{.*?\});',
+        r'ytInitialData\s*=\s*(\{.*?\});\s*(?:var|window|//)',
+    ]
+    for pat in patterns:
+        m = re.search(pat, html, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except Exception:
+                continue
+    return {}
+
+
+def _safe_get(obj, *keys, default=''):
+    """중첩 dict/list를 안전하게 탐색합니다."""
+    for key in keys:
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            obj = obj.get(key)
+        elif isinstance(obj, list) and isinstance(key, int):
+            obj = obj[key] if key < len(obj) else None
+        else:
+            return default
+    return obj if obj is not None else default
+
+
+def _parse_video_renderer(renderer: dict) -> dict | None:
+    """videoRenderer dict에서 제목/링크/조회수/날짜를 추출합니다."""
+    video_id = _safe_get(renderer, 'videoId')
+    if not video_id:
+        return None
+
+    # 제목
+    title = _safe_get(renderer, 'title', 'runs', 0, 'text') or             _safe_get(renderer, 'title', 'simpleText', default='')
+
+    # 조회수 — viewCountText 또는 shortViewCountText
+    view_raw = (
+        _safe_get(renderer, 'viewCountText', 'simpleText') or
+        _safe_get(renderer, 'viewCountText', 'runs', 0, 'text') or
+        _safe_get(renderer, 'shortViewCountText', 'simpleText') or
+        _safe_get(renderer, 'shortViewCountText', 'runs', 0, 'text') or
+        ''
+    )
+
+    # 업로드 날짜 — publishedTimeText
+    date_raw = (
+        _safe_get(renderer, 'publishedTimeText', 'simpleText') or
+        _safe_get(renderer, 'publishedTimeText', 'runs', 0, 'text') or
+        ''
+    )
+
+    return {
+        'title':       str(title),
+        'link':        f'https://www.youtube.com/watch?v={video_id}',
+        'view':        _extract_view(str(view_raw)),
+        'upload_date': str(date_raw),
+    }
+
+
+def _walk_renderers(obj, key='videoRenderer', results=None):
+    """중첩 JSON에서 key에 해당하는 모든 renderer를 재귀 탐색합니다."""
+    if results is None:
+        results = []
+    if isinstance(obj, dict):
+        if key in obj:
+            results.append(obj[key])
+        for v in obj.values():
+            _walk_renderers(v, key, results)
+    elif isinstance(obj, list):
+        for item in obj:
+            _walk_renderers(item, key, results)
+    return results
+
+
 # ── 키워드 검색 스크래퍼 ───────────────────────────────
 def scrape_keyword(keyword: str, upload_filter: str) -> pd.DataFrame:
     SEARCH_KEYWORD = keyword.replace(' ', '+')
@@ -265,13 +345,34 @@ def scrape_keyword(keyword: str, upload_filter: str) -> pd.DataFrame:
     driver = get_driver()
     URL = f"https://www.youtube.com/results?search_query={SEARCH_KEYWORD}{url_param}"
     driver.get(URL)
-    time.sleep(3)
+
+    # JS 렌더링 완료 대기 (ytInitialData가 스크립트에 삽입될 때까지)
+    try:
+        WebDriverWait(driver, 15).until(
+            lambda d: 'ytInitialData' in d.page_source
+        )
+    except Exception:
+        pass
+    time.sleep(2)
     scroll(driver)
 
     html_source = driver.page_source
-    soup = BeautifulSoup(html_source, 'html.parser')
     driver.quit()
 
+    # ytInitialData JSON 파싱 시도
+    data = _extract_yt_initial_data(html_source)
+    if data:
+        renderers = _walk_renderers(data, 'videoRenderer')
+        rows = [r for vr in renderers if (r := _parse_video_renderer(vr))]
+        if rows:
+            df = pd.DataFrame(rows)
+            df['view_num']  = df['view'].apply(parse_view_count)
+            df['days_ago']  = df['upload_date'].apply(date_to_days)
+            df['is_shorts'] = df.apply(lambda r: is_shorts(r['link'], r['title']), axis=1)
+            return df
+
+    # fallback: BeautifulSoup DOM 파싱
+    soup = BeautifulSoup(html_source, 'html.parser')
     return _parse_search_results(soup)
 
 
@@ -314,9 +415,24 @@ def scrape_channel(channel_url: str, tab: str = "동영상") -> pd.DataFrame:
 
     scroll(driver)
     html_source = driver.page_source
-    soup = BeautifulSoup(html_source, 'html.parser')
     driver.quit()
 
+    # ytInitialData JSON 파싱 시도
+    data = _extract_yt_initial_data(html_source)
+    if data:
+        renderers = _walk_renderers(data, 'gridVideoRenderer') +                     _walk_renderers(data, 'richItemRenderer')
+        # richItemRenderer 안의 videoRenderer도 추출
+        video_renderers = _walk_renderers(data, 'videoRenderer')
+        rows = [r for vr in video_renderers if (r := _parse_video_renderer(vr))]
+        if rows:
+            df = pd.DataFrame(rows)
+            df['view_num']  = df['view'].apply(parse_view_count)
+            df['days_ago']  = df['upload_date'].apply(date_to_days)
+            df['is_shorts'] = df.apply(lambda r: is_shorts(r['link'], r['title']), axis=1)
+            return df
+
+    # fallback: BeautifulSoup DOM 파싱
+    soup = BeautifulSoup(html_source, 'html.parser')
     return _parse_channel_results(soup)
 
 
@@ -388,27 +504,35 @@ def _parse_channel_results(soup: BeautifulSoup) -> pd.DataFrame:
 # ── 공통 파싱 헬퍼 ────────────────────────────────────
 def _extract_view(text: str) -> str:
     """
-    raw 메타 텍스트에서 조회수 문자열만 추출.
-    '조회수 N' 패턴을 최우선, 그 다음 만/천/억 단위 숫자,
-    마지막으로 순수 숫자열(단, 날짜 숫자 오탐 방지를 위해 4자리 이상만).
+    조회수 문자열 추출.
+    ytInitialData 및 DOM 텍스트 모두 처리.
+    예: '조회수 1,234,567회', '1.2만회', '35만', '1.2천', '1234567'
     """
+    if not text:
+        return ''
     text = re.sub(r'[•\n\r]', '|', text)
-    # 1순위: '조회수 1.2만', '조회수 1,234,567'
-    m = re.search(r'조회수\s*([\d.,]+(?:[만천억])?)', text)
+
+    # 1순위: '조회수 N만회', '조회수 N,NNN회' 등 — 가장 명확한 패턴
+    m = re.search(r'조회수\s*([\d.,]+\s*(?:[만천억])?)', text)
     if m:
-        return m.group(1).strip()
-    # 2순위: 단위 포함 숫자 (예: '35만', '1.2천')
-    m = re.search(r'([\d.]+[만천억])', text)
+        # '회' 같은 후위 접미사 제거
+        return re.sub(r'[회\s]', '', m.group(1)).strip()
+
+    # 2순위: 단위 포함 숫자 (예: '35만회', '1.2천', '3억')
+    m = re.search(r'([\d.]+\s*[만천억])', text)
     if m:
-        return m.group(1).strip()
-    # 3순위: 쉼표 포함 순수 숫자 (예: '1,234,567') — 날짜 숫자 오탐 방지
+        return re.sub(r'[\s]', '', m.group(1)).strip()
+
+    # 3순위: 쉼표 포함 순수 숫자 (예: '1,234,567')
     m = re.search(r'(\d{1,3}(?:,\d{3})+)', text)
     if m:
         return m.group(1).strip()
-    # 4순위: 5자리 이상 연속 숫자만 (날짜의 1~4자리 숫자 제외)
+
+    # 4순위: 5자리 이상 연속 숫자 (날짜 숫자 오탐 방지)
     m = re.search(r'(\d{5,})', text)
     if m:
         return m.group(1).strip()
+
     return ''
 
 
