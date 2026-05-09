@@ -134,6 +134,10 @@ with st.sidebar:
             if to_delete is not None:
                 removed_url = st.session_state.channel_list[to_delete]['url']
                 st.session_state.channel_list.pop(to_delete)
+                # 체크박스 session_state 키 제거
+                chk_key = f"chk_{removed_url}"
+                if chk_key in st.session_state:
+                    del st.session_state[chk_key]
                 if removed_url in st.session_state.selected_channels:
                     st.session_state.selected_channels.remove(removed_url)
                 st.rerun()
@@ -146,26 +150,31 @@ with st.sidebar:
             st.caption("위에서 채널을 먼저 추가하세요.")
             selected_channels = []
         else:
-            # 전체 선택/해제
+            # 전체 선택/해제 — session_state 키로 체크박스 직접 제어
             col_all, col_none = st.columns(2)
             with col_all:
                 if st.button("전체 선택", use_container_width=True, key="sel_all"):
-                    st.session_state.selected_channels = [
-                        c['url'] for c in st.session_state.channel_list
-                    ]
+                    for ch in st.session_state.channel_list:
+                        st.session_state[f"chk_{ch['url']}"] = True
                     st.rerun()
             with col_none:
                 if st.button("전체 해제", use_container_width=True, key="sel_none"):
-                    st.session_state.selected_channels = []
+                    for ch in st.session_state.channel_list:
+                        st.session_state[f"chk_{ch['url']}"] = False
                     st.rerun()
 
+            # 체크박스: session_state 키로 렌더링 → 버튼이 값을 직접 주입 가능
             selected_channels = []
             for ch in st.session_state.channel_list:
-                checked = ch['url'] in st.session_state.selected_channels
-                val = st.checkbox(ch['name'], value=checked, key=f"chk_{ch['url']}")
+                chk_key = f"chk_{ch['url']}"
+                # 처음 렌더링 시 기본값 설정 (이미 있으면 유지)
+                if chk_key not in st.session_state:
+                    st.session_state[chk_key] = ch['url'] in st.session_state.selected_channels
+                val = st.checkbox(ch['name'], key=chk_key)
                 if val:
                     selected_channels.append(ch['url'])
-            # 선택 상태 동기화
+
+            # selected_channels 동기화
             st.session_state.selected_channels = selected_channels
 
         st.divider()
