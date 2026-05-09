@@ -542,58 +542,83 @@ def scrape_channel(channel_url: str, tab: str = "동영상",
     debug_info = {}
 
     if data:
-        # 채널 탭에서 사용되는 모든 renderer 키 시도
-        RENDERER_KEYS = [
-            'videoRenderer',        # 검색결과, 채널 동영상탭 (일부)
-            'gridVideoRenderer',    # 채널 동영상탭 (구형 레이아웃)
-            'richItemRenderer',     # 채널 동영상탭 (신형)
-            'reelItemRenderer',     # 쇼츠탭
-            'shortsLockupViewModel', # 쇼츠탭 (최신 YouTube)
-        ]
         found_keys = []
-        for key in RENDERER_KEYS:
-            found = _walk_renderers(data, key)
-            if found:
-                found_keys.append(f"{key}({len(found)})")
-            # richItemRenderer 안에 videoRenderer가 중첩된 경우 처리
-            if key == 'richItemRenderer':
-                for ri in found:
-                    inner = ri.get('content', {})
-                    for inner_key in ('videoRenderer', 'reelItemRenderer', 'shortsLockupViewModel'):
-                        inner_vr = inner.get(inner_key)
-                        if inner_vr:
-                            parsed = _parse_video_renderer(inner_vr)
-                            if parsed:
-                                rows.append(parsed)
-            elif key == 'shortsLockupViewModel':
-                # 최신 YouTube 쇼츠 구조
-                for vr in found:
-                    vid = (
-                        _safe_get(vr, 'onTap', 'innertubeCommand', 'reelWatchEndpoint', 'videoId') or
-                        _safe_get(vr, 'entityId') or ''
-                    )
-                    if vid and vid.startswith('shorts-shelf-item-'):
-                        vid = vid.replace('shorts-shelf-item-', '')
-                    title = (
-                        _safe_get(vr, 'overlayMetadata', 'primaryText', 'content') or
-                        _safe_get(vr, 'accessibilityText') or ''
-                    )
-                    view_raw = _safe_get(vr, 'overlayMetadata', 'secondaryText', 'content') or ''
-                    if vid:
-                        rows.append({
-                            'title':       str(title).strip(),
-                            'link':        f'https://www.youtube.com/watch?v={vid}',
-                            'view':        _extract_view(str(view_raw)),
-                            'upload_date': '',
-                        })
-            else:
-                for vr in found:
-                    parsed = _parse_video_renderer(vr)
-                    if parsed:
-                        rows.append(parsed)
+
+        # ── richItemRenderer: 채널 동영상탭 신형 구조 ──────
+        # richItemRenderer > content > videoRenderer (또는 reelItemRenderer 등)
+        rich_items = _walk_renderers(data, 'richItemRenderer')
+        if rich_items:
+            found_keys.append(f"richItemRenderer({len(rich_items)})")
+            for ri in rich_items:
+                # content 키가 있으면 그 안을 탐색, 없으면 ri 자체를 탐색
+                inner_obj = ri.get('content') if isinstance(ri, dict) and 'content' in ri else ri
+                # inner_obj 안의 모든 videoRenderer 계열 키 탐색
+                for inner_key in ('videoRenderer', 'gridVideoRenderer',
+                                  'reelItemRenderer', 'shortsLockupViewModel'):
+                    inner_list = _walk_renderers(inner_obj, inner_key)
+                    if inner_list:
+                        found_keys.append(f"  └{inner_key}({len(inner_list)})")
+                    for vr in inner_list:
+                        parsed = _parse_video_renderer(vr)
+                        if parsed:
+                            rows.append(parsed)
+
+        # ── gridVideoRenderer: 채널 동영상탭 구형 ──────────
+        grid_items = _walk_renderers(data, 'gridVideoRenderer')
+        if grid_items:
+            found_keys.append(f"gridVideoRenderer({len(grid_items)})")
+            for vr in grid_items:
+                parsed = _parse_video_renderer(vr)
+                if parsed:
+                    rows.append(parsed)
+
+        # ── videoRenderer: 검색결과·일부 채널탭 ────────────
+        video_items = _walk_renderers(data, 'videoRenderer')
+        if video_items:
+            found_keys.append(f"videoRenderer({len(video_items)})")
+            for vr in video_items:
+                parsed = _parse_video_renderer(vr)
+                if parsed:
+                    rows.append(parsed)
+
+        # ── reelItemRenderer: 쇼츠탭 ───────────────────────
+        reel_items = _walk_renderers(data, 'reelItemRenderer')
+        if reel_items:
+            found_keys.append(f"reelItemRenderer({len(reel_items)})")
+            for vr in reel_items:
+                parsed = _parse_video_renderer(vr)
+                if parsed:
+                    rows.append(parsed)
+
+        # ── shortsLockupViewModel: 최신 쇼츠 구조 ──────────
+        shorts_items = _walk_renderers(data, 'shortsLockupViewModel')
+        if shorts_items:
+            found_keys.append(f"shortsLockupViewModel({len(shorts_items)})")
+            for vr in shorts_items:
+                vid = (
+                    _safe_get(vr, 'onTap', 'innertubeCommand', 'reelWatchEndpoint', 'videoId') or
+                    _safe_get(vr, 'entityId') or ''
+                )
+                if vid.startswith('shorts-shelf-item-'):
+                    vid = vid.replace('shorts-shelf-item-', '')
+                title = (
+                    _safe_get(vr, 'overlayMetadata', 'primaryText', 'content') or
+                    _safe_get(vr, 'accessibilityText') or ''
+                )
+                view_raw = _safe_get(vr, 'overlayMetadata', 'secondaryText', 'content') or ''
+                if vid:
+                    rows.append({
+                        'title':       str(title).strip(),
+                        'link':        f'https://www.youtube.com/watch?v={vid}',
+                        'view':        _extract_view(str(view_raw)),
+                        'upload_date': '',
+                    })
 
         debug_info['found_keys'] = found_keys
         debug_info['data_top_keys'] = list(data.keys())[:10]
+        debug_info['rich_item_sample'] = (
+            str(rich_items[0])[:500] if rich_items else 'none'
+        )
 
     debug_info['html_len'] = len(html_source)
     debug_info['has_ytInitialData'] = 'ytInitialData' in html_source
