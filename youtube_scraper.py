@@ -539,13 +539,23 @@ def _extract_date(text: str) -> str:
     return ''
 
 
+def _empty_df() -> pd.DataFrame:
+    """항상 올바른 컬럼 구조를 가진 빈 DataFrame 반환."""
+    return pd.DataFrame(columns=[
+        'title', 'link', 'view', 'upload_date',
+        'view_num', 'days_ago', 'is_shorts'
+    ])
+
+
 def _build_df(titles, links, views, dates) -> pd.DataFrame:
     min_len = min(len(titles), len(links), len(views), len(dates))
+    if min_len == 0:
+        return _empty_df()
     df = pd.DataFrame({
-        'title':       titles[:min_len],
-        'link':        links[:min_len],
-        'view':        views[:min_len],
-        'upload_date': dates[:min_len],
+        'title':       [str(t) for t in titles[:min_len]],
+        'link':        [str(l) for l in links[:min_len]],
+        'view':        [str(v) for v in views[:min_len]],
+        'upload_date': [str(d) for d in dates[:min_len]],
     })
     df['view_num'] = df['view'].apply(parse_view_count)
     df['days_ago'] = df['upload_date'].apply(date_to_days)
@@ -556,13 +566,28 @@ def _build_df(titles, links, views, dates) -> pd.DataFrame:
     return df
 
 
+
 def _rows_to_df(rows: list) -> pd.DataFrame:
     """_parse_video_renderer 결과 list → DataFrame 변환."""
-    df = pd.DataFrame(rows)
-    # 필수 컬럼 보장
-    for col in ['title', 'link', 'view', 'upload_date']:
-        if col not in df.columns:
-            df[col] = ''
+    if not rows:
+        return _empty_df()
+
+    # 각 row가 dict이고 필수 키를 가지도록 보장
+    clean_rows = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        clean_rows.append({
+            'title':       str(r.get('title', '')),
+            'link':        str(r.get('link', '')),
+            'view':        str(r.get('view', '')),
+            'upload_date': str(r.get('upload_date', '')),
+        })
+
+    if not clean_rows:
+        return _empty_df()
+
+    df = pd.DataFrame(clean_rows)
     df['view_num'] = df['view'].apply(parse_view_count)
     df['days_ago'] = df['upload_date'].apply(date_to_days)
     df['is_shorts'] = [
@@ -799,10 +824,13 @@ if run_btn:
                     df = df[df['view_num'] >= min_view]
 
                 # ── session_state 저장 ───────────────────
-                st.session_state.df = df.reset_index(drop=True)
-                st.session_state.search_keyword = keyword or ""
-                st.session_state.total_collected = total_collected
-                st.session_state.filtered_count = len(df)
+                if df.empty or 'title' not in df.columns:
+                    st.warning("⚠️ 영상 데이터를 가져오지 못했습니다. 키워드나 채널명을 확인하거나 잠시 후 다시 시도해주세요.")
+                else:
+                    st.session_state.df = df.reset_index(drop=True)
+                    st.session_state.search_keyword = keyword or ""
+                    st.session_state.total_collected = total_collected
+                    st.session_state.filtered_count = len(df)
 
             except Exception as e:
                 st.error(f"❌ 오류 발생: {e}")
