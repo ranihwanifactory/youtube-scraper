@@ -32,6 +32,11 @@ if 'total_collected' not in st.session_state:
     st.session_state.total_collected = 0
 if 'filtered_count' not in st.session_state:
     st.session_state.filtered_count = 0
+# 채널 목록: [{'name': '표시이름', 'url': '정규화된URL'}, ...]
+if 'channel_list' not in st.session_state:
+    st.session_state.channel_list = []
+if 'selected_channels' not in st.session_state:
+    st.session_state.selected_channels = []
 
 # ── 상수 ─────────────────────────────────────────────
 UPLOAD_FILTER_MAP = {
@@ -49,6 +54,17 @@ UPLOAD_DAY_LIMIT = {
 }
 
 
+# ── 채널 URL 정규화 유틸 ──────────────────────────────
+def normalize_channel_url(raw: str) -> str:
+    ch = raw.strip()
+    if ch.startswith("https://") or ch.startswith("http://"):
+        return ch.rstrip('/')
+    elif ch.startswith("@"):
+        return f"https://www.youtube.com/{ch}"
+    else:
+        return f"https://www.youtube.com/@{ch}"
+
+
 # ── 사이드바 ──────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ 검색 설정")
@@ -58,7 +74,7 @@ with st.sidebar:
         "🎯 검색 모드",
         options=["키워드 검색", "채널 검색"],
         horizontal=True,
-        help="키워드 검색: 유튜브 전체에서 키워드로 검색\n채널 검색: 특정 채널의 영상만 수집"
+        help="키워드 검색: 유튜브 전체에서 키워드로 검색\n채널 검색: 등록한 채널 목록에서 수집"
     )
 
     st.divider()
@@ -66,32 +82,114 @@ with st.sidebar:
     if search_mode == "키워드 검색":
         keyword = st.text_input("🔍 검색 키워드", placeholder="예: 성주참외, 골프 레슨...")
         channel_input = ""
+
     else:
-        st.subheader("📺 채널 설정")
-        channel_input = st.text_input(
-            "채널 URL 또는 핸들",
-            placeholder="예: @채널명  또는  https://youtube.com/@채널명",
-            help="유튜브 채널 URL이나 @핸들을 입력하세요"
-        )
-        keyword = st.text_input(
-            "🔍 채널 내 키워드 필터 (선택)",
-            placeholder="입력 시 제목에 해당 단어 포함 영상만 수집",
-            help="비워두면 채널 전체 영상을 수집합니다"
-        )
-        if channel_input:
-            # @핸들 정규화
-            ch = channel_input.strip()
-            if ch.startswith("https://") or ch.startswith("http://"):
-                pass  # 그대로 사용
-            elif ch.startswith("@"):
-                ch = f"https://www.youtube.com/{ch}"
+        # ── 채널 목록 관리 ──────────────────────────────
+        st.subheader("📺 채널 목록 관리")
+
+        # 채널 추가 입력
+        col_ch, col_add = st.columns([3, 1])
+        with col_ch:
+            new_ch_input = st.text_input(
+                "채널 추가",
+                placeholder="@채널명 또는 URL",
+                label_visibility="collapsed",
+                key="new_ch_input"
+            )
+        with col_add:
+            st.markdown("<br>", unsafe_allow_html=True)
+            add_btn = st.button("➕", use_container_width=True, key="add_ch_btn")
+
+        if add_btn and new_ch_input.strip():
+            normalized = normalize_channel_url(new_ch_input.strip())
+            # 표시 이름: @핸들 또는 URL 마지막 경로
+            display_name = new_ch_input.strip()
+            existing_urls = [c['url'] for c in st.session_state.channel_list]
+            if normalized not in existing_urls:
+                st.session_state.channel_list.append({
+                    'name': display_name,
+                    'url':  normalized
+                })
+                st.rerun()
             else:
-                ch = f"https://www.youtube.com/@{ch}"
-            channel_input = ch
+                st.warning("이미 추가된 채널입니다.")
+
+        # 채널 목록 표시 + 삭제
+        if not st.session_state.channel_list:
+            st.caption("아직 추가된 채널이 없습니다.")
+        else:
+            st.caption(f"총 {len(st.session_state.channel_list)}개 채널 등록됨")
+            to_delete = None
+            for i, ch in enumerate(st.session_state.channel_list):
+                col_name, col_del = st.columns([4, 1])
+                with col_name:
+                    st.markdown(
+                        f"<small>{'✅' if ch['url'] in st.session_state.selected_channels else '⬜'} "
+                        f"{ch['name']}</small>",
+                        unsafe_allow_html=True
+                    )
+                with col_del:
+                    if st.button("🗑️", key=f"del_{i}", use_container_width=True):
+                        to_delete = i
+            if to_delete is not None:
+                removed_url = st.session_state.channel_list[to_delete]['url']
+                st.session_state.channel_list.pop(to_delete)
+                if removed_url in st.session_state.selected_channels:
+                    st.session_state.selected_channels.remove(removed_url)
+                st.rerun()
+
+        st.divider()
+
+        # ── 채널 선택 (수집 대상) ────────────────────────
+        st.subheader("✅ 수집할 채널 선택")
+        if not st.session_state.channel_list:
+            st.caption("위에서 채널을 먼저 추가하세요.")
+            selected_channels = []
+        else:
+            # 전체 선택/해제
+            col_all, col_none = st.columns(2)
+            with col_all:
+                if st.button("전체 선택", use_container_width=True, key="sel_all"):
+                    st.session_state.selected_channels = [
+                        c['url'] for c in st.session_state.channel_list
+                    ]
+                    st.rerun()
+            with col_none:
+                if st.button("전체 해제", use_container_width=True, key="sel_none"):
+                    st.session_state.selected_channels = []
+                    st.rerun()
+
+            selected_channels = []
+            for ch in st.session_state.channel_list:
+                checked = ch['url'] in st.session_state.selected_channels
+                val = st.checkbox(ch['name'], value=checked, key=f"chk_{ch['url']}")
+                if val:
+                    selected_channels.append(ch['url'])
+            # 선택 상태 동기화
+            st.session_state.selected_channels = selected_channels
+
+        st.divider()
+
+        # ── 채널 탭 선택 ────────────────────────────────
+        st.subheader("📅 수집 탭")
+        channel_tab = st.selectbox(
+            "채널 페이지 탭",
+            options=["동영상", "쇼츠"],
+            help="동영상: 일반 영상 탭 / 쇼츠: 쇼츠 탭"
+        )
+
+        # ── 채널 내 키워드 필터 ──────────────────────────
+        keyword = st.text_input(
+            "🔍 제목 키워드 필터 (선택)",
+            placeholder="비워두면 전체 영상 수집",
+            help="입력 시 해당 단어가 제목에 포함된 영상만 표시합니다",
+            key="ch_keyword"
+        )
+        channel_input = ""  # 단일 채널 입력 비활성화
 
     st.divider()
 
-    # ── 쇼츠 옵션 ──────────────────────────────────────
+    # ── 콘텐츠 유형 ─────────────────────────────────────
     st.subheader("🩳 콘텐츠 유형")
     content_type = st.radio(
         "수집할 영상 유형",
@@ -111,15 +209,6 @@ with st.sidebar:
         )
     else:
         upload_filter = "전체"
-        st.subheader("📅 채널 페이지 탭")
-        channel_tab = st.selectbox(
-            "수집할 탭",
-            options=["동영상", "쇼츠", "전체"],
-            help="채널 페이지에서 수집할 탭을 선택합니다. '쇼츠만' 선택 시 자동으로 쇼츠 탭으로 이동합니다."
-        )
-        # 콘텐츠 유형과 채널 탭 동기화 안내
-        if content_type == "쇼츠만" and channel_tab != "쇼츠":
-            st.info("💡 '쇼츠만' 선택 시 쇼츠 탭을 권장합니다.")
 
     st.divider()
 
@@ -375,61 +464,122 @@ def scrape_keyword(keyword: str, upload_filter: str) -> pd.DataFrame:
     return _parse_search_results(soup)
 
 
-# ── 채널 스크래퍼 ─────────────────────────────────────
-def scrape_channel(channel_url: str, tab: str = "동영상") -> pd.DataFrame:
+# ── 단일 채널 스크래퍼 ───────────────────────────────
+def scrape_channel(channel_url: str, tab: str = "동영상",
+                   channel_name: str = "") -> pd.DataFrame:
     """
-    채널의 특정 탭(동영상 / 쇼츠 / 전체)에서 영상 목록을 수집합니다.
+    채널 탭(동영상/쇼츠)에서 영상 목록을 수집합니다.
+    ytInitialData JSON을 우선 파싱하고, 실패 시 DOM 파싱 fallback.
     """
-    driver = get_driver()
-
-    # 탭 URL 매핑
-    tab_map = {
-        "동영상": "/videos",
-        "쇼츠":   "/shorts",
-        "전체":   "/streams",   # 라이브/전체 탭. 필요 시 "" 으로 변경 가능
-    }
+    tab_map = {"동영상": "/videos", "쇼츠": "/shorts"}
     tab_suffix = tab_map.get(tab, "/videos")
 
-    # 기본 채널 URL 정규화 (끝 슬래시 제거 후 탭 추가)
+    # URL 정규화: 기존 탭 경로 제거 후 원하는 탭 추가
     base_url = channel_url.rstrip('/')
-    # 이미 /videos 등 탭이 붙어 있으면 제거
-    for suffix in ['/videos', '/shorts', '/streams', '/featured', '/playlists']:
+    for suffix in ['/videos', '/shorts', '/streams', '/featured', '/playlists', '/about']:
         if base_url.endswith(suffix):
-            base_url = base_url[: -len(suffix)]
+            base_url = base_url[:-len(suffix)]
             break
-
     target_url = base_url + tab_suffix
-    driver.get(target_url)
-    time.sleep(4)
 
-    # 쿠키 동의 팝업 처리 (있을 경우)
+    driver = get_driver()
     try:
-        accept_btn = WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Accept') or contains(., '동의')]"))
-        )
-        accept_btn.click()
-        time.sleep(2)
-    except Exception:
-        pass
+        driver.get(target_url)
 
-    scroll(driver)
-    html_source = driver.page_source
-    driver.quit()
+        # ytInitialData 삽입 대기
+        try:
+            WebDriverWait(driver, 20).until(
+                lambda d: 'ytInitialData' in d.page_source
+            )
+        except Exception:
+            pass
+        time.sleep(3)
 
-    # ytInitialData JSON 파싱 시도
+        # 쿠키/동의 팝업 처리
+        try:
+            btn = WebDriverWait(driver, 4).until(
+                EC.element_to_be_clickable(
+                    (By.XPATH, "//button[contains(., 'Accept') or contains(., '동의') or contains(., '동의합니다')]")
+                )
+            )
+            btn.click()
+            time.sleep(1)
+        except Exception:
+            pass
+
+        scroll(driver)
+        html_source = driver.page_source
+    finally:
+        driver.quit()
+
+    rows = []
+
+    # ── 방법 1: ytInitialData JSON 파싱 ─────────────────
     data = _extract_yt_initial_data(html_source)
     if data:
-        rows = []
-        for vr in _walk_renderers(data, 'videoRenderer'):
-            parsed = _parse_video_renderer(vr)
-            if parsed:
-                rows.append(parsed)
-        if rows:
-            return _rows_to_df(rows)
+        # 채널 탭은 gridVideoRenderer 또는 videoRenderer 사용
+        for key in ('gridVideoRenderer', 'videoRenderer', 'reelItemRenderer'):
+            for vr in _walk_renderers(data, key):
+                parsed = _parse_video_renderer(vr)
+                if parsed:
+                    rows.append(parsed)
+        # 중복 제거 (video_id 기준)
+        seen = set()
+        unique = []
+        for r in rows:
+            vid = r['link'].split('v=')[-1].split('&')[0]
+            if vid not in seen:
+                seen.add(vid)
+                unique.append(r)
+        rows = unique
 
-    # fallback: BeautifulSoup DOM 파싱
-    soup = BeautifulSoup(html_source, 'html.parser')
-    return _parse_channel_results(soup)
+    # ── 방법 2: BeautifulSoup DOM fallback ──────────────
+    if not rows:
+        soup = BeautifulSoup(html_source, 'html.parser')
+        df_fallback = _parse_channel_results(soup)
+        if not df_fallback.empty:
+            if channel_name:
+                df_fallback['channel'] = channel_name
+            return df_fallback
+
+    df = _rows_to_df(rows)
+    if channel_name:
+        df['channel'] = channel_name
+    return df
+
+
+# ── 다중 채널 수집 ────────────────────────────────────
+def scrape_multiple_channels(channel_urls: list, channel_names: list,
+                             tab: str = "동영상",
+                             progress_cb=None) -> pd.DataFrame:
+    """
+    여러 채널을 순차적으로 수집해 하나의 DataFrame으로 합칩니다.
+    progress_cb: (current, total, channel_name) → None
+    """
+    all_dfs = []
+    total = len(channel_urls)
+    for i, (url, name) in enumerate(zip(channel_urls, channel_names)):
+        if progress_cb:
+            progress_cb(i, total, name)
+        try:
+            df = scrape_channel(url, tab=tab, channel_name=name)
+            if not df.empty:
+                all_dfs.append(df)
+        except Exception as e:
+            st.warning(f"⚠️ '{name}' 수집 실패: {e}")
+        # 채널 간 요청 간격 (봇 감지 방지)
+        if i < total - 1:
+            time.sleep(random.uniform(2, 4))
+
+    if not all_dfs:
+        df_empty = _empty_df()
+        df_empty['channel'] = ''
+        return df_empty
+
+    result = pd.concat(all_dfs, ignore_index=True)
+    # 중복 링크 제거
+    result = result.drop_duplicates(subset=['link']).reset_index(drop=True)
+    return result
 
 
 # ── HTML 파싱: 검색 결과 ──────────────────────────────
@@ -659,7 +809,8 @@ def render_results():
     col1.metric("📦 전체 수집", f"{total_collected}개")
     col2.metric("✅ 필터 후",  f"{filtered_count}개")
     col3.metric("🩳 쇼츠",    f"{df['is_shorts'].sum()}개")
-    col4.metric("🔍 키워드",  keyword if keyword else "채널 전체")
+    ch_count = df['channel'].nunique() if 'channel' in df.columns else "-"
+    col4.metric("📺 채널 수",  f"{ch_count}개" if 'channel' in df.columns else (keyword if keyword else "전체"))
 
     if filtered_count == 0:
         st.warning("⚠️ 필터 조건에 맞는 영상이 없습니다. 조건을 완화해 보세요.")
@@ -732,18 +883,25 @@ def render_results():
         if len(df_sorted) == 0:
             st.warning("⚠️ 해당 조건에 맞는 영상이 없습니다. 조건을 변경해 보세요.")
         else:
-            df_display = df_sorted.drop(columns=['view_num', 'days_ago']).copy()
+            drop_cols = ['view_num', 'days_ago']
+            df_display = df_sorted.drop(columns=[c for c in drop_cols if c in df_sorted.columns]).copy()
             df_display['is_shorts'] = df_display['is_shorts'].apply(
                 lambda x: "🩳 쇼츠" if x else "🎬 일반"
             )
             df_display = df_display.rename(columns={'is_shorts': '유형'})
+            # 채널명 컬럼 앞으로 이동
+            if 'channel' in df_display.columns:
+                cols = ['channel', 'title', '유형', 'view', 'upload_date', 'link']
+                df_display = df_display[[c for c in cols if c in df_display.columns]]
+                df_display = df_display.rename(columns={'channel': '채널'})
             df_display['link'] = df_display['link'].apply(
                 lambda x: f'<a href="{x}" target="_blank">🔗 보기</a>'
             )
             st.write(df_display.to_html(escape=False, index=False), unsafe_allow_html=True)
 
         st.divider()
-        csv_df = df_sorted.drop(columns=['view_num', 'days_ago']).copy()
+        drop_cols_csv = ['view_num', 'days_ago']
+        csv_df = df_sorted.drop(columns=[c for c in drop_cols_csv if c in df_sorted.columns]).copy()
         csv_df['is_shorts'] = csv_df['is_shorts'].apply(lambda x: "쇼츠" if x else "일반")
         csv = csv_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
         st.download_button(
@@ -788,53 +946,72 @@ def render_results():
 
 # ── 실행 ─────────────────────────────────────────────
 if run_btn:
-    # 입력 유효성 검사
     if search_mode == "키워드 검색" and not keyword:
         st.warning("⚠️ 검색 키워드를 입력해주세요!")
-    elif search_mode == "채널 검색" and not channel_input:
-        st.warning("⚠️ 채널 URL 또는 핸들을 입력해주세요!")
+
+    elif search_mode == "채널 검색" and not st.session_state.selected_channels:
+        st.warning("⚠️ 수집할 채널을 1개 이상 선택해주세요!")
+
     else:
-        label = keyword if search_mode == "키워드 검색" else channel_input
-        with st.spinner(f"🔄 '{label}' 크롤링 중... (1~3분 소요)"):
-            try:
-                # ── 크롤링 ──────────────────────────────
-                if search_mode == "키워드 검색":
+        try:
+            if search_mode == "키워드 검색":
+                with st.spinner(f"🔄 '{keyword}' 크롤링 중..."):
                     df = scrape_keyword(keyword, upload_filter)
-                else:
-                    tab_sel = channel_tab if content_type != "쇼츠만" else "쇼츠"
-                    df = scrape_channel(channel_input, tab=tab_sel)
 
-                total_collected = len(df)
+            else:
+                # 선택된 채널 URL & 이름 매핑
+                sel_urls  = st.session_state.selected_channels
+                name_map  = {c['url']: c['name'] for c in st.session_state.channel_list}
+                sel_names = [name_map.get(u, u) for u in sel_urls]
+                tab_sel   = channel_tab if content_type != "쇼츠만" else "쇼츠"
 
-                # ── 날짜 필터 (키워드 검색만) ───────────
-                if search_mode == "키워드 검색":
-                    day_limit = UPLOAD_DAY_LIMIT.get(upload_filter, 9999)
-                    if day_limit < 9999:
-                        df = df[df['days_ago'] <= day_limit]
+                prog_bar  = st.progress(0, text="채널 수집 준비 중...")
+                status_tx = st.empty()
 
-                # ── 콘텐츠 유형 필터 ────────────────────
-                df = filter_content_type(df, content_type)
+                def progress_cb(i, total, name):
+                    pct = int(i / total * 100)
+                    prog_bar.progress(pct, text=f"({i+1}/{total}) '{name}' 수집 중...")
+                    status_tx.info(f"🔄 **{name}** 채널 크롤링 중...")
 
-                # ── 채널 내 키워드 필터 ──────────────────
-                if search_mode == "채널 검색" and keyword:
-                    df = df[df['title'].str.contains(keyword, case=False, na=False)]
+                df = scrape_multiple_channels(
+                    sel_urls, sel_names,
+                    tab=tab_sel,
+                    progress_cb=progress_cb
+                )
+                prog_bar.progress(100, text="✅ 수집 완료!")
+                status_tx.empty()
 
-                # ── 조회수 필터 ─────────────────────────
-                if use_view_filter and min_view > 0:
-                    df = df[df['view_num'] >= min_view]
+            total_collected = len(df)
 
-                # ── session_state 저장 ───────────────────
-                if df.empty or 'title' not in df.columns:
-                    st.warning("⚠️ 영상 데이터를 가져오지 못했습니다. 키워드나 채널명을 확인하거나 잠시 후 다시 시도해주세요.")
-                else:
-                    st.session_state.df = df.reset_index(drop=True)
-                    st.session_state.search_keyword = keyword or ""
-                    st.session_state.total_collected = total_collected
-                    st.session_state.filtered_count = len(df)
+            # ── 날짜 필터 (키워드 검색만) ─────────────
+            if search_mode == "키워드 검색":
+                day_limit = UPLOAD_DAY_LIMIT.get(upload_filter, 9999)
+                if day_limit < 9999:
+                    df = df[df['days_ago'] <= day_limit]
 
-            except Exception as e:
-                st.error(f"❌ 오류 발생: {e}")
-                st.info("크롬 드라이버나 패키지 문제일 수 있습니다. 터미널 오류를 확인해주세요.")
+            # ── 콘텐츠 유형 필터 ──────────────────────
+            df = filter_content_type(df, content_type)
+
+            # ── 제목 키워드 필터 (채널 검색) ──────────
+            if search_mode == "채널 검색" and keyword:
+                df = df[df['title'].str.contains(keyword, case=False, na=False)]
+
+            # ── 조회수 필터 ───────────────────────────
+            if use_view_filter and min_view > 0:
+                df = df[df['view_num'] >= min_view]
+
+            # ── 저장 ──────────────────────────────────
+            if df.empty or 'title' not in df.columns:
+                st.warning("⚠️ 영상 데이터를 가져오지 못했습니다. 채널명/키워드를 확인하거나 잠시 후 다시 시도해주세요.")
+            else:
+                st.session_state.df = df.reset_index(drop=True)
+                st.session_state.search_keyword = keyword or ""
+                st.session_state.total_collected = total_collected
+                st.session_state.filtered_count = len(df)
+
+        except Exception as e:
+            st.error(f"❌ 오류 발생: {e}")
+            st.info("크롬 드라이버나 패키지 문제일 수 있습니다. 터미널 오류를 확인해주세요.")
 
 # ── session_state에 결과가 있으면 항상 표시 ──────────────
 if st.session_state.df is not None:
