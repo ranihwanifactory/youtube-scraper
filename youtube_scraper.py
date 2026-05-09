@@ -379,35 +379,58 @@ def _safe_get(obj, *keys, default=''):
 
 
 def _parse_video_renderer(renderer: dict):
-    """videoRenderer dict에서 제목/링크/조회수/날짜를 추출합니다."""
-    video_id = _safe_get(renderer, 'videoId')
+    """
+    videoRenderer / gridVideoRenderer / reelItemRenderer 등
+    다양한 renderer 타입에서 공통 필드를 추출합니다.
+    """
+    if not isinstance(renderer, dict):
+        return None
+
+    # ── videoId 추출 (위치가 타입마다 다름) ──────────────
+    video_id = (
+        renderer.get('videoId') or
+        _safe_get(renderer, 'navigationEndpoint', 'watchEndpoint', 'videoId') or
+        _safe_get(renderer, 'navigationEndpoint', 'reelWatchEndpoint', 'videoId') or
+        _safe_get(renderer, 'onClickCommand', 'reelWatchEndpoint', 'videoId') or
+        ''
+    )
     if not video_id:
         return None
 
-    # 제목
-    title = _safe_get(renderer, 'title', 'runs', 0, 'text') or             _safe_get(renderer, 'title', 'simpleText', default='')
+    # ── 제목 ─────────────────────────────────────────────
+    title = (
+        _safe_get(renderer, 'title', 'runs', 0, 'text') or
+        _safe_get(renderer, 'title', 'simpleText') or
+        _safe_get(renderer, 'headline', 'simpleText') or
+        _safe_get(renderer, 'headline', 'runs', 0, 'text') or
+        _safe_get(renderer, 'accessibility', 'accessibilityData', 'label') or
+        ''
+    )
 
-    # 조회수 — viewCountText 또는 shortViewCountText
+    # ── 조회수 ───────────────────────────────────────────
     view_raw = (
         _safe_get(renderer, 'viewCountText', 'simpleText') or
         _safe_get(renderer, 'viewCountText', 'runs', 0, 'text') or
         _safe_get(renderer, 'shortViewCountText', 'simpleText') or
         _safe_get(renderer, 'shortViewCountText', 'runs', 0, 'text') or
+        _safe_get(renderer, 'videoInfo', 'runs', 0, 'text') or
         ''
     )
 
-    # 업로드 날짜 — publishedTimeText
+    # ── 업로드 날짜 ───────────────────────────────────────
     date_raw = (
         _safe_get(renderer, 'publishedTimeText', 'simpleText') or
         _safe_get(renderer, 'publishedTimeText', 'runs', 0, 'text') or
+        _safe_get(renderer, 'videoInfo', 'runs', 2, 'text') or
+        _safe_get(renderer, 'videoInfo', 'runs', 4, 'text') or
         ''
     )
 
     return {
-        'title':       str(title),
+        'title':       str(title).strip(),
         'link':        f'https://www.youtube.com/watch?v={video_id}',
         'view':        _extract_view(str(view_raw)),
-        'upload_date': str(date_raw),
+        'upload_date': str(date_raw).strip(),
     }
 
 
@@ -516,35 +539,97 @@ def scrape_channel(channel_url: str, tab: str = "동영상",
 
     # ── 방법 1: ytInitialData JSON 파싱 ─────────────────
     data = _extract_yt_initial_data(html_source)
+    debug_info = {}
+
     if data:
-        # 채널 탭은 gridVideoRenderer 또는 videoRenderer 사용
-        for key in ('gridVideoRenderer', 'videoRenderer', 'reelItemRenderer'):
-            for vr in _walk_renderers(data, key):
-                parsed = _parse_video_renderer(vr)
-                if parsed:
-                    rows.append(parsed)
-        # 중복 제거 (video_id 기준)
-        seen = set()
-        unique = []
-        for r in rows:
-            vid = r['link'].split('v=')[-1].split('&')[0]
-            if vid not in seen:
-                seen.add(vid)
-                unique.append(r)
-        rows = unique
+        # 채널 탭에서 사용되는 모든 renderer 키 시도
+        RENDERER_KEYS = [
+            'videoRenderer',        # 검색결과, 채널 동영상탭 (일부)
+            'gridVideoRenderer',    # 채널 동영상탭 (구형 레이아웃)
+            'richItemRenderer',     # 채널 동영상탭 (신형)
+            'reelItemRenderer',     # 쇼츠탭
+            'shortsLockupViewModel', # 쇼츠탭 (최신 YouTube)
+        ]
+        found_keys = []
+        for key in RENDERER_KEYS:
+            found = _walk_renderers(data, key)
+            if found:
+                found_keys.append(f"{key}({len(found)})")
+            # richItemRenderer 안에 videoRenderer가 중첩된 경우 처리
+            if key == 'richItemRenderer':
+                for ri in found:
+                    inner = ri.get('content', {})
+                    for inner_key in ('videoRenderer', 'reelItemRenderer', 'shortsLockupViewModel'):
+                        inner_vr = inner.get(inner_key)
+                        if inner_vr:
+                            parsed = _parse_video_renderer(inner_vr)
+                            if parsed:
+                                rows.append(parsed)
+            elif key == 'shortsLockupViewModel':
+                # 최신 YouTube 쇼츠 구조
+                for vr in found:
+                    vid = (
+                        _safe_get(vr, 'onTap', 'innertubeCommand', 'reelWatchEndpoint', 'videoId') or
+                        _safe_get(vr, 'entityId') or ''
+                    )
+                    if vid and vid.startswith('shorts-shelf-item-'):
+                        vid = vid.replace('shorts-shelf-item-', '')
+                    title = (
+                        _safe_get(vr, 'overlayMetadata', 'primaryText', 'content') or
+                        _safe_get(vr, 'accessibilityText') or ''
+                    )
+                    view_raw = _safe_get(vr, 'overlayMetadata', 'secondaryText', 'content') or ''
+                    if vid:
+                        rows.append({
+                            'title':       str(title).strip(),
+                            'link':        f'https://www.youtube.com/watch?v={vid}',
+                            'view':        _extract_view(str(view_raw)),
+                            'upload_date': '',
+                        })
+            else:
+                for vr in found:
+                    parsed = _parse_video_renderer(vr)
+                    if parsed:
+                        rows.append(parsed)
+
+        debug_info['found_keys'] = found_keys
+        debug_info['data_top_keys'] = list(data.keys())[:10]
+
+    debug_info['html_len'] = len(html_source)
+    debug_info['has_ytInitialData'] = 'ytInitialData' in html_source
+    debug_info['rows_before_dedup'] = len(rows)
+
+    # 중복 제거 (video_id 기준)
+    seen = set()
+    unique_rows = []
+    for r in rows:
+        vid = r['link'].split('v=')[-1].split('&')[0]
+        if vid and vid not in seen:
+            seen.add(vid)
+            unique_rows.append(r)
+    rows = unique_rows
+    debug_info['rows_after_dedup'] = len(rows)
 
     # ── 방법 2: BeautifulSoup DOM fallback ──────────────
     if not rows:
         soup = BeautifulSoup(html_source, 'html.parser')
         df_fallback = _parse_channel_results(soup)
+        debug_info['fallback_rows'] = len(df_fallback)
         if not df_fallback.empty:
             if channel_name:
                 df_fallback['channel'] = channel_name
+            df_fallback['_debug'] = str(debug_info)
             return df_fallback
 
     df = _rows_to_df(rows)
     if channel_name:
         df['channel'] = channel_name
+
+    # 디버그 정보를 session_state에 저장 (UI에서 확인 가능)
+    if 'scrape_debug' not in st.session_state:
+        st.session_state.scrape_debug = {}
+    st.session_state.scrape_debug[channel_name or channel_url] = debug_info
+
     return df
 
 
@@ -883,7 +968,7 @@ def render_results():
         if len(df_sorted) == 0:
             st.warning("⚠️ 해당 조건에 맞는 영상이 없습니다. 조건을 변경해 보세요.")
         else:
-            drop_cols = ['view_num', 'days_ago']
+            drop_cols = ['view_num', 'days_ago', '_debug']
             df_display = df_sorted.drop(columns=[c for c in drop_cols if c in df_sorted.columns]).copy()
             df_display['is_shorts'] = df_display['is_shorts'].apply(
                 lambda x: "🩳 쇼츠" if x else "🎬 일반"
@@ -900,7 +985,7 @@ def render_results():
             st.write(df_display.to_html(escape=False, index=False), unsafe_allow_html=True)
 
         st.divider()
-        drop_cols_csv = ['view_num', 'days_ago']
+        drop_cols_csv = ['view_num', 'days_ago', '_debug']
         csv_df = df_sorted.drop(columns=[c for c in drop_cols_csv if c in df_sorted.columns]).copy()
         csv_df['is_shorts'] = csv_df['is_shorts'].apply(lambda x: "쇼츠" if x else "일반")
         csv = csv_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
@@ -1003,6 +1088,10 @@ if run_btn:
             # ── 저장 ──────────────────────────────────
             if df.empty or 'title' not in df.columns:
                 st.warning("⚠️ 영상 데이터를 가져오지 못했습니다. 채널명/키워드를 확인하거나 잠시 후 다시 시도해주세요.")
+                # 디버그 정보 표시
+                if 'scrape_debug' in st.session_state and st.session_state.scrape_debug:
+                    with st.expander("🔍 디버그 정보 (개발자용)"):
+                        st.json(st.session_state.scrape_debug)
             else:
                 st.session_state.df = df.reset_index(drop=True)
                 st.session_state.search_keyword = keyword or ""
