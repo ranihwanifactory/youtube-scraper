@@ -292,20 +292,29 @@ def is_shorts(link: str, title: str = "") -> bool:
     return False
 
 
-# ── 무한 스크롤 ───────────────────────────────────────
-def scroll(driver):
-    last_page_height = driver.execute_script("return document.documentElement.scrollHeight")
+# ── 무한 스크롤 (lazy-load 대기 강화) ────────────────────
+def scroll(driver, max_same_count: int = 3):
+    """
+    동일 높이가 연속 max_same_count회 감지될 때 종료.
+    YouTube lazy-load 지연을 더 잘 견딥니다.
+    """
+    same_count = 0
+    last_h = driver.execute_script("return document.documentElement.scrollHeight")
     while True:
-        pause_time = random.uniform(1, 2)
         driver.execute_script("window.scrollTo(0, document.documentElement.scrollHeight);")
-        time.sleep(pause_time)
-        driver.execute_script("window.scrollTo(0, document.documentElement.scrollHeight-50)")
-        time.sleep(pause_time)
-        new_page_height = driver.execute_script("return document.documentElement.scrollHeight")
-        if new_page_height == last_page_height:
-            break
+        time.sleep(random.uniform(1.5, 2.5))
+        driver.execute_script("window.scrollTo(0, document.documentElement.scrollHeight - 200);")
+        time.sleep(0.5)
+        driver.execute_script("window.scrollTo(0, document.documentElement.scrollHeight);")
+        time.sleep(1.0)
+        new_h = driver.execute_script("return document.documentElement.scrollHeight")
+        if new_h == last_h:
+            same_count += 1
+            if same_count >= max_same_count:
+                break
         else:
-            last_page_height = new_page_height
+            same_count = 0
+            last_h = new_h
 
 
 def get_driver():
@@ -416,7 +425,7 @@ def _parse_video_renderer(renderer: dict):
         ''
     )
 
-    # ── 쇼츠 여부: lengthText 없으면 쇼츠일 가능성 높음 + reelWatchEndpoint 확인
+    # ── 쇼츠 판별: reelWatchEndpoint 또는 60초 이하 duration ──
     is_reel = bool(
         _safe_get(renderer, 'navigationEndpoint', 'reelWatchEndpoint', 'videoId') or
         _safe_get(renderer, 'onClickCommand', 'reelWatchEndpoint', 'videoId')
@@ -426,24 +435,24 @@ def _parse_video_renderer(renderer: dict):
         _safe_get(renderer, 'lengthText', 'runs', 0, 'text') or
         ''
     )
-    # 60초(1분) 이하이면 쇼츠 후보
-    def _duration_under_60(lt: str) -> bool:
+    def _is_short_duration(lt: str) -> bool:
         if not lt:
             return False
         parts = lt.strip().split(':')
         try:
-            if len(parts) == 2:  # MM:SS
-                return int(parts[0]) == 0 and int(parts[1]) <= 60
-            if len(parts) == 1:
+            if len(parts) == 2:   # M:SS
+                return int(parts[0]) == 0
+            if len(parts) == 1:   # SS
                 return int(parts[0]) <= 60
         except Exception:
             pass
         return False
 
-    link_url = f'https://www.youtube.com/watch?v={video_id}'
-    # reelWatchEndpoint 이거나 duration이 60초 이하면 /shorts/ 링크로 변환
-    if is_reel or _duration_under_60(length_text):
-        link_url = f'https://www.youtube.com/shorts/{video_id}'
+    link_url = (
+        f'https://www.youtube.com/shorts/{video_id}'
+        if is_reel or _is_short_duration(length_text)
+        else f'https://www.youtube.com/watch?v={video_id}'
+    )
 
     return {
         'title':       str(title).strip(),
@@ -551,32 +560,30 @@ def _walk_renderers(obj, key='videoRenderer', results=None):
 def _parse_channel_search_data(data: dict) -> list:
     """
     채널 /search?query= 결과 전용 파서.
-    구조: contents > twoColumnBrowseResultsRenderer > tabs > tabRenderer
-          > content > sectionListRenderer > contents > itemSectionRenderer
-          > contents > [videoRenderer, ...]
-    또는 단순 재귀로 itemSectionRenderer 내부 videoRenderer 수집.
+    구조: itemSectionRenderer > contents > [videoRenderer, ...]
+    채널 검색 결과는 richItemRenderer가 아닌 이 구조로 옵니다.
     """
     rows = []
-    # itemSectionRenderer 내부의 videoRenderer를 직접 수집
     item_sections = _walk_renderers(data, 'itemSectionRenderer')
     for section in item_sections:
-        contents = section.get('contents', []) if isinstance(section, dict) else []
-        for item in contents:
+        if not isinstance(section, dict):
+            continue
+        for item in section.get('contents', []):
             if not isinstance(item, dict):
                 continue
-            # videoRenderer
             vr = item.get('videoRenderer')
             if vr:
                 parsed = _parse_video_renderer(vr)
                 if parsed:
                     rows.append(parsed)
-            # channelRenderer, playlistRenderer 등은 건너뜀
-
     # 중복 제거
     seen = set()
     unique = []
     for r in rows:
-        vid = r['link'].split('v=')[-1].split('&')[0]
+        vid = r['link'].split('/')[-1].split('?')[0].replace('watch?v=', '')
+        # /shorts/{id} 또는 watch?v={id} 모두 처리
+        if '=' in vid:
+            vid = vid.split('=')[-1]
         if vid and vid not in seen:
             seen.add(vid)
             unique.append(r)
@@ -584,7 +591,6 @@ def _parse_channel_search_data(data: dict) -> list:
 
 
 def _parse_all_renderers_from_data(data: dict) -> list:
-    """ytInitialData에서 모든 renderer 타입을 통합 파싱합니다."""
     rows = []
 
     # richItemRenderer (채널 동영상탭 신형)
@@ -662,6 +668,19 @@ def _parse_all_renderers_from_data(data: dict) -> list:
     return unique
 
 
+def _save_debug(key: str, url: str, rows: int, html: str, method: str):
+    """디버그 정보를 session_state에 저장합니다."""
+    if 'scrape_debug' not in st.session_state:
+        st.session_state.scrape_debug = {}
+    st.session_state.scrape_debug[key] = {
+        'url': url,
+        'rows': rows,
+        'has_ytInitialData': 'ytInitialData' in html,
+        'html_len': len(html),
+        'parse_method': method,
+    }
+
+
 # ── 키워드 검색 스크래퍼 ───────────────────────────────
 def scrape_keyword(keyword: str, upload_filter: str) -> pd.DataFrame:
     SEARCH_KEYWORD = keyword.replace(' ', '+')
@@ -693,14 +712,14 @@ def scrape_keyword(keyword: str, upload_filter: str) -> pd.DataFrame:
     return _parse_search_results(soup)
 
 
-# ── ★ 핵심 수정: 채널 내 키워드 검색 ─────────────────────
+# ── 채널 내 키워드 검색 ────────────────────────────────
 def scrape_channel_search(channel_url: str, search_keyword: str,
                           channel_name: str = "") -> pd.DataFrame:
     """
     채널 내에서 키워드로 검색합니다.
     URL 패턴: https://www.youtube.com/@채널명/search?query=키워드
+    itemSectionRenderer 구조를 우선 파싱합니다.
     """
-    # 기본 채널 URL에서 탭 경로 제거
     base_url = channel_url.rstrip('/')
     for suffix in ['/videos', '/shorts', '/streams', '/featured', '/playlists', '/about', '/search']:
         if base_url.endswith(suffix):
@@ -712,6 +731,7 @@ def scrape_channel_search(channel_url: str, search_keyword: str,
 
     driver = get_driver()
     rows = []
+    html_source = ""
 
     try:
         driver.get(search_url)
@@ -742,33 +762,30 @@ def scrape_channel_search(channel_url: str, search_keyword: str,
     finally:
         driver.quit()
 
-    # ytInitialData 파싱
+    # 파싱: itemSectionRenderer 우선 → 일반 renderer fallback
     data = _extract_yt_initial_data(html_source)
+    parse_method = 'none'
     if data:
-        # 채널 /search 결과는 itemSectionRenderer > videoRenderer 구조
-        rows = _parse_channel_search_data(data)
-        # fallback: 일반 renderer 파싱
+        rows = _parse_channel_search_data(data)   # 채널 검색 전용
+        parse_method = 'itemSectionRenderer'
         if not rows:
-            rows = _parse_all_renderers_from_data(data)
-
-    # 디버그 저장
-    if 'scrape_debug' not in st.session_state:
-        st.session_state.scrape_debug = {}
-    st.session_state.scrape_debug[channel_name or channel_url] = {
-        'mode': 'channel_search',
-        'url': search_url,
-        'rows': len(rows),
-        'has_ytInitialData': 'ytInitialData' in html_source,
-    }
+            rows = _parse_all_renderers_from_data(data)  # 일반 fallback
+            parse_method = 'all_renderers_fallback'
 
     # DOM fallback
     if not rows:
         soup = BeautifulSoup(html_source, 'html.parser')
         df_fallback = _parse_search_results(soup)
+        parse_method = 'dom_fallback'
         if not df_fallback.empty:
             if channel_name:
                 df_fallback['channel'] = channel_name
+            _save_debug(channel_name or channel_url, search_url, len(df_fallback),
+                        html_source, parse_method)
             return df_fallback
+
+    _save_debug(channel_name or channel_url, search_url, len(rows),
+                html_source, parse_method)
 
     df = _rows_to_df(rows)
     if channel_name:
@@ -836,12 +853,8 @@ def scrape_channel(channel_url: str, tab: str = "동영상",
     if channel_name:
         df['channel'] = channel_name
 
-    if 'scrape_debug' not in st.session_state:
-        st.session_state.scrape_debug = {}
-    st.session_state.scrape_debug[channel_name or channel_url] = {
-        'rows': len(rows),
-        'url': target_url,
-    }
+    _save_debug(channel_name or channel_url, target_url, len(rows),
+                html_source, 'tab_collect')
 
     return df
 
@@ -1253,6 +1266,9 @@ if run_btn:
         st.warning("⚠️ 채널 내 검색할 키워드를 입력해주세요!")
 
     else:
+        # 매 실행마다 디버그 초기화 (이전 실행 캐시 제거)
+        st.session_state.scrape_debug = {}
+
         try:
             if search_mode == "키워드 검색":
                 with st.spinner(f"🔄 '{keyword}' 크롤링 중..."):
@@ -1302,8 +1318,11 @@ if run_btn:
                 if day_limit < 9999:
                     df = df[df['days_ago'] <= day_limit]
 
-            # ── 콘텐츠 유형 필터 (키워드 검색 + 탭 수집만 적용, 채널 내 검색은 결과탭에서 필터) ──
             ch_mode = st.session_state.get("channel_search_mode", "탭 수집 (전체 영상)")
+
+            # ── 콘텐츠 유형 필터 ──────────────────────
+            # 채널 내 키워드 검색: 결과 UI 필터에서만 적용 (수집 후 즉시 필터 X)
+            # 탭 수집 / 전체 키워드 검색: 즉시 적용
             if search_mode == "키워드 검색" or ch_mode == "탭 수집 (전체 영상)":
                 df = filter_content_type(df, content_type)
 
@@ -1317,6 +1336,7 @@ if run_btn:
             if use_view_filter and min_view > 0:
                 df = df[df['view_num'] >= min_view]
 
+            # ── 결과 저장 ─────────────────────────────
             if df.empty or 'title' not in df.columns:
                 st.warning("⚠️ 영상 데이터를 가져오지 못했습니다. 채널명/키워드를 확인하거나 잠시 후 다시 시도해주세요.")
             else:
@@ -1325,9 +1345,9 @@ if run_btn:
                 st.session_state.total_collected = total_collected
                 st.session_state.filtered_count = len(df)
 
-            # 디버그 정보는 항상 표시 (개발 편의)
-            if 'scrape_debug' in st.session_state and st.session_state.scrape_debug:
-                with st.expander("🔍 디버그 정보 (개발자용)", expanded=df.empty if 'df' in dir() else True):
+            # ── 디버그 (항상 표시) ────────────────────
+            if st.session_state.get('scrape_debug'):
+                with st.expander("🔍 디버그 정보 (개발자용)", expanded=df.empty):
                     st.json(st.session_state.scrape_debug)
 
         except Exception as e:
