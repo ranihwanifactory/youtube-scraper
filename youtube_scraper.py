@@ -3,8 +3,12 @@ import time
 import random
 import re
 import json
+import io
 import pandas as pd
 import anthropic
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -41,6 +45,9 @@ if 'channel_recommendations' not in st.session_state:
     st.session_state.channel_recommendations = None
 if 'channel_rec_keyword' not in st.session_state:
     st.session_state.channel_rec_keyword = ''
+# ── 구독자 수 캐시 {channel_url: subscriber_count} ────
+if 'subscriber_cache' not in st.session_state:
+    st.session_state.subscriber_cache = {}
 
 # ── 상수 ─────────────────────────────────────────────
 UPLOAD_FILTER_MAP = {
@@ -688,6 +695,291 @@ def _save_debug(key: str, url: str, rows: int, html: str, method: str):
     }
 
 
+# ── 채널 구독자 수 수집 ───────────────────────────────
+def parse_subscriber_count(sub_str: str) -> int:
+    """구독자 수 문자열을 정수로 변환합니다."""
+    if not sub_str:
+        return 0
+    s = sub_str.strip()
+    s = re.sub(r'[구독자\s,]', '', s)
+    try:
+        if '억' in s:
+            m = re.search(r'([\d.]+)억', s)
+            return int(float(m.group(1)) * 100_000_000) if m else 0
+        if '만' in s:
+            m = re.search(r'([\d.]+)만', s)
+            return int(float(m.group(1)) * 10_000) if m else 0
+        if '천' in s:
+            m = re.search(r'([\d.]+)천', s)
+            return int(float(m.group(1)) * 1_000) if m else 0
+        # 영어권: 1.2M, 500K
+        if 'M' in s.upper():
+            m = re.search(r'([\d.]+)[Mm]', s)
+            return int(float(m.group(1)) * 1_000_000) if m else 0
+        if 'K' in s.upper():
+            m = re.search(r'([\d.]+)[Kk]', s)
+            return int(float(m.group(1)) * 1_000) if m else 0
+        pure = re.sub(r'[^\d]', '', s)
+        return int(pure) if pure else 0
+    except Exception:
+        return 0
+
+
+def fmt_subscriber(n: int) -> str:
+    """구독자 수를 보기 좋게 포맷합니다."""
+    if n <= 0:
+        return '-'
+    if n >= 100_000_000:
+        return f"{n/100_000_000:.1f}억"
+    if n >= 10_000:
+        return f"{n/10_000:.1f}만"
+    if n >= 1_000:
+        return f"{n/1_000:.1f}천"
+    return str(n)
+
+
+def scrape_subscriber_count(channel_url: str) -> int:
+    """
+    채널 페이지에서 구독자 수를 수집합니다.
+    캐시를 먼저 확인하고, 없으면 크롤링합니다.
+    """
+    if not channel_url or not channel_url.startswith('http'):
+        return 0
+
+    cache = st.session_state.get('subscriber_cache', {})
+    if channel_url in cache:
+        return cache[channel_url]
+
+    # base URL 정규화
+    base_url = channel_url.rstrip('/')
+    for suffix in ['/videos', '/shorts', '/streams', '/featured',
+                   '/playlists', '/about', '/search']:
+        if base_url.endswith(suffix):
+            base_url = base_url[:-len(suffix)]
+            break
+
+    driver = get_driver()
+    sub_count = 0
+    try:
+        driver.get(base_url)
+        try:
+            WebDriverWait(driver, 15).until(
+                lambda d: 'ytInitialData' in d.page_source
+            )
+        except Exception:
+            pass
+        time.sleep(2)
+        html = driver.page_source
+
+        # ytInitialData에서 구독자 수 파싱
+        data = _extract_yt_initial_data(html)
+        if data:
+            # header 내 subscriberCountText
+            sub_raw = (
+                _safe_get(data, 'header', 'pageHeaderRenderer',
+                          'content', 'pageHeaderViewModel',
+                          'metadata', 'contentMetadataViewModel',
+                          'metadataRows', 1, 'metadataParts', 0, 'text', 'content') or
+                _safe_get(data, 'header', 'c4TabbedHeaderRenderer',
+                          'subscriberCountText', 'simpleText') or
+                _safe_get(data, 'header', 'c4TabbedHeaderRenderer',
+                          'subscriberCountText', 'runs', 0, 'text') or
+                ''
+            )
+            if sub_raw:
+                sub_count = parse_subscriber_count(sub_raw)
+
+        # DOM fallback
+        if sub_count == 0:
+            patterns = [
+                r'([\d.,]+[만천억MmKk]?\s*(?:만|천|억)?)\s*구독자',
+                r'"subscriberCountText".*?"simpleText"\s*:\s*"([^"]+)"',
+                r'구독자\s*([\d.,]+[만천억MmKk]*)',
+            ]
+            for pat in patterns:
+                m = re.search(pat, html)
+                if m:
+                    sub_count = parse_subscriber_count(m.group(1))
+                    if sub_count > 0:
+                        break
+
+    except Exception:
+        pass
+    finally:
+        driver.quit()
+
+    st.session_state.subscriber_cache[channel_url] = sub_count
+    return sub_count
+
+
+def scrape_subscribers_batch(channel_stats: pd.DataFrame,
+                             progress_placeholder=None) -> pd.DataFrame:
+    """
+    channel_stats DataFrame의 각 채널에 대해 구독자 수를 수집하여
+    'subscriber' 컬럼을 추가합니다.
+    """
+    total = len(channel_stats)
+    subscribers = []
+
+    for i, row in channel_stats.iterrows():
+        ch_url = row.get('channel_url', '')
+        if progress_placeholder:
+            progress_placeholder.info(
+                f"🔄 구독자 수 수집 중... ({i+1}/{total}) **{row['channel_name']}**"
+            )
+        sub = scrape_subscriber_count(ch_url)
+        subscribers.append(sub)
+        if i < total - 1:
+            time.sleep(random.uniform(1.0, 2.0))
+
+    channel_stats = channel_stats.copy()
+    channel_stats['subscriber'] = subscribers
+    return channel_stats
+
+
+# ── 채널 통계 엑셀 생성 함수 ─────────────────────────
+def build_channel_excel(channel_stats: pd.DataFrame, keyword: str) -> bytes:
+    """
+    채널 통계 DataFrame을 예쁘게 포맷된 엑셀 바이트로 반환합니다.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "추천 채널"
+
+    # ── 색상 정의 ────────────────────────────────────
+    HDR_FILL  = PatternFill("solid", fgColor="1F4E79")   # 진한 파랑
+    ROW1_FILL = PatternFill("solid", fgColor="DEEAF1")   # 연한 파랑
+    ROW2_FILL = PatternFill("solid", fgColor="FFFFFF")   # 흰색
+    GOLD_FILL = PatternFill("solid", fgColor="FFD700")   # 금색 (1위)
+    SILV_FILL = PatternFill("solid", fgColor="C0C0C0")   # 은색 (2위)
+    BRNZ_FILL = PatternFill("solid", fgColor="CD7F32")   # 동색 (3위)
+
+    HDR_FONT  = Font(name='Arial', bold=True, color='FFFFFF', size=11)
+    BODY_FONT = Font(name='Arial', size=10)
+    BOLD_FONT = Font(name='Arial', bold=True, size=10)
+    LINK_FONT = Font(name='Arial', size=10, color='0563C1', underline='single')
+
+    center  = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    left    = Alignment(horizontal='left',   vertical='center', wrap_text=True)
+    right   = Alignment(horizontal='right',  vertical='center')
+
+    thin = Side(style='thin', color='B0B0B0')
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    # ── 제목 행 ──────────────────────────────────────
+    ws.merge_cells('A1:K1')
+    title_cell = ws['A1']
+    title_cell.value = f"📺 '{keyword or '검색'}' 키워드 추천 채널 분석"
+    title_cell.font = Font(name='Arial', bold=True, size=14, color='1F4E79')
+    title_cell.alignment = center
+    title_cell.fill = PatternFill("solid", fgColor="EBF3FB")
+    ws.row_dimensions[1].height = 30
+
+    ws.merge_cells('A2:K2')
+    ws['A2'].value = f"수집일: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}  |  총 {len(channel_stats)}개 채널"
+    ws['A2'].font = Font(name='Arial', size=9, color='666666', italic=True)
+    ws['A2'].alignment = center
+    ws.row_dimensions[2].height = 18
+
+    # ── 헤더 행 ──────────────────────────────────────
+    headers = [
+        ('순위', 6), ('채널명', 22), ('구독자', 12), ('영상 수', 9),
+        ('평균 조회수', 12), ('최고 조회수', 12), ('총 조회수', 12),
+        ('일반 영상', 9), ('쇼츠', 7), ('종합 점수', 10), ('채널 링크', 30),
+    ]
+    col_keys = [
+        'rank', 'channel_name', 'subscriber', 'video_count',
+        'avg_view', 'max_view', 'total_view',
+        'regular_count', 'shorts_count', 'score', 'channel_url',
+    ]
+
+    for col_idx, (hdr, width) in enumerate(headers, 1):
+        cell = ws.cell(row=3, column=col_idx, value=hdr)
+        cell.font = HDR_FONT
+        cell.fill = HDR_FILL
+        cell.alignment = center
+        cell.border = border
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+    ws.row_dimensions[3].height = 22
+
+    # ── 데이터 행 ─────────────────────────────────────
+    def fmt_num(v):
+        if v >= 100_000_000:
+            return f"{v/100_000_000:.1f}억"
+        if v >= 10_000:
+            return f"{v/10_000:.1f}만"
+        if v >= 1_000:
+            return f"{v/1_000:.1f}천"
+        return str(int(v)) if v else '0'
+
+    medal_fills = {1: GOLD_FILL, 2: SILV_FILL, 3: BRNZ_FILL}
+
+    for row_idx, (_, row) in enumerate(channel_stats.iterrows(), 4):
+        rank = row.get('rank', row_idx - 3)
+        fill = medal_fills.get(rank, ROW1_FILL if (row_idx % 2 == 0) else ROW2_FILL)
+        ws.row_dimensions[row_idx].height = 20
+
+        for col_idx, key in enumerate(col_keys, 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.border = border
+            cell.fill = fill
+
+            val = row.get(key, '')
+
+            if key == 'rank':
+                cell.value = int(rank)
+                cell.font = BOLD_FONT
+                cell.alignment = center
+
+            elif key == 'channel_name':
+                cell.value = str(val)
+                cell.font = BOLD_FONT if rank <= 3 else BODY_FONT
+                cell.alignment = left
+
+            elif key == 'subscriber':
+                sub_n = int(val) if val else 0
+                cell.value = fmt_subscriber(sub_n) if sub_n > 0 else '-'
+                cell.font = BODY_FONT
+                cell.alignment = right
+
+            elif key in ('avg_view', 'max_view', 'total_view'):
+                cell.value = fmt_num(int(val) if val else 0)
+                cell.font = BODY_FONT
+                cell.alignment = right
+
+            elif key == 'score':
+                cell.value = round(float(val), 1) if val else 0
+                cell.font = BODY_FONT
+                cell.alignment = center
+
+            elif key == 'channel_url':
+                url = str(val)
+                if url.startswith('http'):
+                    cell.value = url
+                    cell.hyperlink = url
+                    cell.font = LINK_FONT
+                else:
+                    cell.value = '-'
+                    cell.font = BODY_FONT
+                cell.alignment = left
+
+            else:
+                cell.value = int(val) if val else 0
+                cell.font = BODY_FONT
+                cell.alignment = center
+
+    # ── 틀 고정 ──────────────────────────────────────
+    ws.freeze_panes = 'A4'
+
+    # ── 자동 필터 ─────────────────────────────────────
+    ws.auto_filter.ref = f"A3:K{3 + len(channel_stats)}"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
 # ── 키워드 검색 스크래퍼 ───────────────────────────────
 def scrape_keyword(keyword: str, upload_filter: str) -> pd.DataFrame:
     SEARCH_KEYWORD = keyword.replace(' ', '+')
@@ -1154,6 +1446,10 @@ def extract_channel_stats(df: pd.DataFrame) -> pd.DataFrame:
     agg['shorts_count'] = agg['shorts_count'].astype(int)
     agg['regular_count'] = agg['video_count'] - agg['shorts_count']
 
+    # 구독자 수는 별도 수집 전까지 0으로 초기화
+    if 'subscriber' not in agg.columns:
+        agg['subscriber'] = 0
+
     # 점수: 평균 조회수 60% + 영상 수 20% + 최고 조회수 20%
     max_avg = agg['avg_view'].max() or 1
     max_cnt = agg['video_count'].max() or 1
@@ -1335,14 +1631,108 @@ def render_results():
                 "키워드로 검색하면 각 영상의 채널 정보가 함께 수집됩니다."
             )
         else:
-            # ── 상단: 채널 통계 표 ────────────────────
+            # ── 구독자 수 수집 버튼 ───────────────────
+            st.markdown("### 👥 구독자 수 수집")
+
+            # 캐시에서 구독자 수 복원
+            cached_subs = st.session_state.get('subscriber_cache', {})
+            if cached_subs:
+                channel_stats['subscriber'] = channel_stats['channel_url'].apply(
+                    lambda u: cached_subs.get(u, 0)
+                )
+                has_subscribers = channel_stats['subscriber'].sum() > 0
+            else:
+                has_subscribers = False
+
+            sub_col1, sub_col2 = st.columns([2, 4])
+            with sub_col1:
+                fetch_sub_btn = st.button(
+                    "🔍 구독자 수 수집 시작",
+                    type="primary",
+                    use_container_width=True,
+                    key="fetch_sub_btn",
+                    help="각 채널 페이지를 방문하여 구독자 수를 수집합니다. 채널 수에 따라 시간이 소요됩니다."
+                )
+            with sub_col2:
+                if has_subscribers:
+                    st.success(f"✅ {channel_stats[channel_stats['subscriber'] > 0]['channel_name'].count()}개 채널 구독자 수 수집 완료")
+                else:
+                    st.caption("⚠️ 구독자 수를 수집하면 구독자순 정렬이 가능합니다. 채널 수에 따라 1~3분 소요됩니다.")
+
+            if fetch_sub_btn:
+                sub_progress = st.empty()
+                with st.spinner("채널 페이지에서 구독자 수를 수집하고 있습니다..."):
+                    channel_stats = scrape_subscribers_batch(channel_stats, sub_progress)
+                    # 캐시 업데이트
+                    for _, row in channel_stats.iterrows():
+                        url = row.get('channel_url', '')
+                        if url:
+                            st.session_state.subscriber_cache[url] = row.get('subscriber', 0)
+                sub_progress.empty()
+                has_subscribers = channel_stats['subscriber'].sum() > 0
+                if has_subscribers:
+                    st.success("✅ 구독자 수 수집 완료!")
+                else:
+                    st.warning("⚠️ 구독자 수를 가져오지 못했습니다. 채널 URL을 확인해 주세요.")
+
+            st.divider()
+
+            # ── 정렬 기준 선택 ────────────────────────
             st.markdown("### 📊 채널별 영상 현황")
 
-            display_stats = channel_stats[['rank', 'channel_name', 'video_count',
-                                           'avg_view', 'max_view', 'total_view',
-                                           'regular_count', 'shorts_count', 'channel_url']].copy()
+            sort_col, _ = st.columns([2, 4])
+            with sort_col:
+                sort_options = ["종합 점수순", "평균 조회수순", "최고 조회수순", "총 조회수순", "영상 수순"]
+                if has_subscribers:
+                    sort_options.insert(1, "구독자 수순")
+                ch_sort = st.selectbox(
+                    "🔃 정렬 기준",
+                    options=sort_options,
+                    key="ch_sort_select"
+                )
+
+            sort_map = {
+                "종합 점수순":    'score',
+                "구독자 수순":   'subscriber',
+                "평균 조회수순": 'avg_view',
+                "최고 조회수순": 'max_view',
+                "총 조회수순":   'total_view',
+                "영상 수순":     'video_count',
+            }
+            sort_col_key = sort_map.get(ch_sort, 'score')
+            channel_stats_sorted = channel_stats.sort_values(
+                sort_col_key, ascending=False
+            ).reset_index(drop=True)
+            channel_stats_sorted['rank'] = channel_stats_sorted.index + 1
+
+            # ── 채널 통계 표 ──────────────────────────
+            display_cols = ['rank', 'channel_name']
+            display_rename = {'rank': '순위', 'channel_name': '채널명'}
+
+            if has_subscribers:
+                display_cols.append('subscriber')
+                display_rename['subscriber'] = '구독자'
+
+            display_cols += ['video_count', 'avg_view', 'max_view',
+                             'total_view', 'regular_count', 'shorts_count',
+                             'score', 'channel_url']
+            display_rename.update({
+                'video_count':   '영상 수',
+                'avg_view':      '평균 조회수',
+                'max_view':      '최고 조회수',
+                'total_view':    '총 조회수',
+                'regular_count': '일반',
+                'shorts_count':  '쇼츠',
+                'score':         '종합 점수',
+                'channel_url':   '링크',
+            })
+
+            display_stats = channel_stats_sorted[
+                [c for c in display_cols if c in channel_stats_sorted.columns]
+            ].copy()
 
             def fmt_view(v):
+                v = int(v) if v else 0
                 if v >= 100_000_000:
                     return f"{v/100_000_000:.1f}억"
                 elif v >= 10_000:
@@ -1351,24 +1741,49 @@ def render_results():
                     return f"{v/1_000:.1f}천"
                 return str(v)
 
-            display_stats['avg_view']   = display_stats['avg_view'].apply(fmt_view)
-            display_stats['max_view']   = display_stats['max_view'].apply(fmt_view)
-            display_stats['total_view'] = display_stats['total_view'].apply(fmt_view)
+            for col in ['avg_view', 'max_view', 'total_view']:
+                if col in display_stats.columns:
+                    display_stats[col] = display_stats[col].apply(fmt_view)
+
+            if 'subscriber' in display_stats.columns:
+                display_stats['subscriber'] = display_stats['subscriber'].apply(
+                    lambda v: fmt_subscriber(int(v)) if v else '-'
+                )
+
+            if 'score' in display_stats.columns:
+                display_stats['score'] = display_stats['score'].apply(
+                    lambda v: f"{v:.1f}" if v else '0'
+                )
+
             display_stats['channel_url'] = display_stats['channel_url'].apply(
-                lambda x: f'<a href="{x}" target="_blank">🔗 채널</a>' if x and x.startswith('http') else ''
+                lambda x: f'<a href="{x}" target="_blank">🔗 채널</a>'
+                if x and str(x).startswith('http') else ''
             )
-            display_stats = display_stats.rename(columns={
-                'rank':          '순위',
-                'channel_name':  '채널명',
-                'video_count':   '영상 수',
-                'avg_view':      '평균 조회수',
-                'max_view':      '최고 조회수',
-                'total_view':    '총 조회수',
-                'regular_count': '일반',
-                'shorts_count':  '쇼츠',
-                'channel_url':   '링크',
-            })
+            display_stats = display_stats.rename(columns=display_rename)
             st.write(display_stats.to_html(escape=False, index=False), unsafe_allow_html=True)
+
+            # ── 엑셀 다운로드 ─────────────────────────
+            st.divider()
+            st.markdown("#### ⬇️ 채널 분석 데이터 다운로드")
+            dl_col1, dl_col2 = st.columns([1, 3])
+            with dl_col1:
+                try:
+                    excel_bytes = build_channel_excel(channel_stats_sorted, keyword)
+                    st.download_button(
+                        label="📥 엑셀(.xlsx) 다운로드",
+                        data=excel_bytes,
+                        file_name=f"추천채널_{keyword or 'channel'}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary",
+                        use_container_width=True,
+                    )
+                except Exception as e:
+                    st.error(f"엑셀 생성 오류: {e}")
+            with dl_col2:
+                st.caption(
+                    "채널명, 구독자 수, 영상 수, 평균/최고/총 조회수, 종합 점수, 채널 링크가 포함됩니다.\n"
+                    "구독자 수를 먼저 수집하면 더 완성된 데이터를 받을 수 있습니다."
+                )
 
             st.divider()
 
@@ -1399,7 +1814,7 @@ def render_results():
                 if analyze_btn:
                     with st.spinner("🧠 AI가 채널 데이터를 분석 중입니다..."):
                         try:
-                            raw = get_ai_channel_recommendations(channel_stats, keyword or "검색")
+                            raw = get_ai_channel_recommendations(channel_stats_sorted, keyword or "검색")
                             raw_clean = re.sub(r'```json|```', '', raw).strip()
                             result_json = json.loads(raw_clean)
                             st.session_state.channel_recommendations = result_json
