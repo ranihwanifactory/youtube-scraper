@@ -36,6 +36,11 @@ if 'channel_list' not in st.session_state:
     st.session_state.channel_list = []
 if 'selected_channels' not in st.session_state:
     st.session_state.selected_channels = []
+# ── 추천 채널 캐시 ────────────────────────────────────
+if 'channel_recommendations' not in st.session_state:
+    st.session_state.channel_recommendations = None
+if 'channel_rec_keyword' not in st.session_state:
+    st.session_state.channel_rec_keyword = ''
 
 # ── 상수 ─────────────────────────────────────────────
 UPLOAD_FILTER_MAP = {
@@ -294,10 +299,6 @@ def is_shorts(link: str, title: str = "") -> bool:
 
 # ── 무한 스크롤 (lazy-load 대기 강화) ────────────────────
 def scroll(driver, max_same_count: int = 3):
-    """
-    동일 높이가 연속 max_same_count회 감지될 때 종료.
-    YouTube lazy-load 지연을 더 잘 견딥니다.
-    """
     same_count = 0
     last_h = driver.execute_script("return document.documentElement.scrollHeight")
     while True:
@@ -425,7 +426,21 @@ def _parse_video_renderer(renderer: dict):
         ''
     )
 
-    # ── 쇼츠 판별: reelWatchEndpoint 또는 60초 이하 duration ──
+    # ── 채널명 추출 ──────────────────────────────────
+    channel_name_raw = (
+        _safe_get(renderer, 'ownerText', 'runs', 0, 'text') or
+        _safe_get(renderer, 'longBylineText', 'runs', 0, 'text') or
+        _safe_get(renderer, 'shortBylineText', 'runs', 0, 'text') or
+        ''
+    )
+    channel_url_raw = (
+        _safe_get(renderer, 'ownerText', 'runs', 0, 'navigationEndpoint', 'browseEndpoint', 'canonicalBaseUrl') or
+        _safe_get(renderer, 'longBylineText', 'runs', 0, 'navigationEndpoint', 'browseEndpoint', 'canonicalBaseUrl') or
+        _safe_get(renderer, 'shortBylineText', 'runs', 0, 'navigationEndpoint', 'browseEndpoint', 'canonicalBaseUrl') or
+        ''
+    )
+
+    # ── 쇼츠 판별 ────────────────────────────────────
     is_reel = bool(
         _safe_get(renderer, 'navigationEndpoint', 'reelWatchEndpoint', 'videoId') or
         _safe_get(renderer, 'onClickCommand', 'reelWatchEndpoint', 'videoId')
@@ -440,9 +455,9 @@ def _parse_video_renderer(renderer: dict):
             return False
         parts = lt.strip().split(':')
         try:
-            if len(parts) == 2:   # M:SS
+            if len(parts) == 2:
                 return int(parts[0]) == 0
-            if len(parts) == 1:   # SS
+            if len(parts) == 1:
                 return int(parts[0]) <= 60
         except Exception:
             pass
@@ -455,10 +470,12 @@ def _parse_video_renderer(renderer: dict):
     )
 
     return {
-        'title':       str(title).strip(),
-        'link':        link_url,
-        'view':        _extract_view(str(view_raw)),
-        'upload_date': str(date_raw).strip(),
+        'title':        str(title).strip(),
+        'link':         link_url,
+        'view':         _extract_view(str(view_raw)),
+        'upload_date':  str(date_raw).strip(),
+        'channel_name': str(channel_name_raw).strip(),
+        'channel_url':  f'https://www.youtube.com{channel_url_raw}' if channel_url_raw and not channel_url_raw.startswith('http') else str(channel_url_raw).strip(),
     }
 
 
@@ -536,10 +553,12 @@ def _parse_lockup_view_model(lvm: dict):
                     date_raw = m_d.group(0)
 
     return {
-        'title':       str(title).strip(),
-        'link':        f'https://www.youtube.com/watch?v={video_id}',
-        'view':        _extract_view(str(view_raw)),
-        'upload_date': str(date_raw).strip(),
+        'title':        str(title).strip(),
+        'link':         f'https://www.youtube.com/watch?v={video_id}',
+        'view':         _extract_view(str(view_raw)),
+        'upload_date':  str(date_raw).strip(),
+        'channel_name': '',
+        'channel_url':  '',
     }
 
 
@@ -558,11 +577,6 @@ def _walk_renderers(obj, key='videoRenderer', results=None):
 
 
 def _parse_channel_search_data(data: dict) -> list:
-    """
-    채널 /search?query= 결과 전용 파서.
-    구조: itemSectionRenderer > contents > [videoRenderer, ...]
-    채널 검색 결과는 richItemRenderer가 아닌 이 구조로 옵니다.
-    """
     rows = []
     item_sections = _walk_renderers(data, 'itemSectionRenderer')
     for section in item_sections:
@@ -576,12 +590,10 @@ def _parse_channel_search_data(data: dict) -> list:
                 parsed = _parse_video_renderer(vr)
                 if parsed:
                     rows.append(parsed)
-    # 중복 제거
     seen = set()
     unique = []
     for r in rows:
         vid = r['link'].split('/')[-1].split('?')[0].replace('watch?v=', '')
-        # /shorts/{id} 또는 watch?v={id} 모두 처리
         if '=' in vid:
             vid = vid.split('=')[-1]
         if vid and vid not in seen:
@@ -593,7 +605,6 @@ def _parse_channel_search_data(data: dict) -> list:
 def _parse_all_renderers_from_data(data: dict) -> list:
     rows = []
 
-    # richItemRenderer (채널 동영상탭 신형)
     rich_items = _walk_renderers(data, 'richItemRenderer')
     for ri in rich_items:
         inner_obj = ri.get('content') if isinstance(ri, dict) and 'content' in ri else ri
@@ -617,25 +628,21 @@ def _parse_all_renderers_from_data(data: dict) -> list:
             if parsed:
                 rows.append(parsed)
 
-    # gridVideoRenderer (구형)
     for vr in _walk_renderers(data, 'gridVideoRenderer'):
         parsed = _parse_video_renderer(vr)
         if parsed:
             rows.append(parsed)
 
-    # videoRenderer (검색결과·채널 검색탭)
     for vr in _walk_renderers(data, 'videoRenderer'):
         parsed = _parse_video_renderer(vr)
         if parsed:
             rows.append(parsed)
 
-    # reelItemRenderer (쇼츠탭)
     for vr in _walk_renderers(data, 'reelItemRenderer'):
         parsed = _parse_video_renderer(vr)
         if parsed:
             rows.append(parsed)
 
-    # shortsLockupViewModel (최신 쇼츠)
     for vr in _walk_renderers(data, 'shortsLockupViewModel'):
         vid = (
             _safe_get(vr, 'onTap', 'innertubeCommand', 'reelWatchEndpoint', 'videoId') or
@@ -650,13 +657,14 @@ def _parse_all_renderers_from_data(data: dict) -> list:
         view_raw = _safe_get(vr, 'overlayMetadata', 'secondaryText', 'content') or ''
         if vid:
             rows.append({
-                'title':       str(title).strip(),
-                'link':        f'https://www.youtube.com/watch?v={vid}',
-                'view':        _extract_view(str(view_raw)),
-                'upload_date': '',
+                'title':        str(title).strip(),
+                'link':         f'https://www.youtube.com/watch?v={vid}',
+                'view':         _extract_view(str(view_raw)),
+                'upload_date':  '',
+                'channel_name': '',
+                'channel_url':  '',
             })
 
-    # 중복 제거
     seen = set()
     unique = []
     for r in rows:
@@ -669,7 +677,6 @@ def _parse_all_renderers_from_data(data: dict) -> list:
 
 
 def _save_debug(key: str, url: str, rows: int, html: str, method: str):
-    """디버그 정보를 session_state에 저장합니다."""
     if 'scrape_debug' not in st.session_state:
         st.session_state.scrape_debug = {}
     st.session_state.scrape_debug[key] = {
@@ -715,11 +722,6 @@ def scrape_keyword(keyword: str, upload_filter: str) -> pd.DataFrame:
 # ── 채널 내 키워드 검색 ────────────────────────────────
 def scrape_channel_search(channel_url: str, search_keyword: str,
                           channel_name: str = "") -> pd.DataFrame:
-    """
-    채널 내에서 키워드로 검색합니다.
-    URL 패턴: https://www.youtube.com/@채널명/search?query=키워드
-    itemSectionRenderer 구조를 우선 파싱합니다.
-    """
     base_url = channel_url.rstrip('/')
     for suffix in ['/videos', '/shorts', '/streams', '/featured', '/playlists', '/about', '/search']:
         if base_url.endswith(suffix):
@@ -744,7 +746,6 @@ def scrape_channel_search(channel_url: str, search_keyword: str,
             pass
         time.sleep(3)
 
-        # 동의 팝업 처리
         try:
             btn = WebDriverWait(driver, 4).until(
                 EC.element_to_be_clickable(
@@ -762,17 +763,15 @@ def scrape_channel_search(channel_url: str, search_keyword: str,
     finally:
         driver.quit()
 
-    # 파싱: itemSectionRenderer 우선 → 일반 renderer fallback
     data = _extract_yt_initial_data(html_source)
     parse_method = 'none'
     if data:
-        rows = _parse_channel_search_data(data)   # 채널 검색 전용
+        rows = _parse_channel_search_data(data)
         parse_method = 'itemSectionRenderer'
         if not rows:
-            rows = _parse_all_renderers_from_data(data)  # 일반 fallback
+            rows = _parse_all_renderers_from_data(data)
             parse_method = 'all_renderers_fallback'
 
-    # DOM fallback
     if not rows:
         soup = BeautifulSoup(html_source, 'html.parser')
         df_fallback = _parse_search_results(soup)
@@ -887,13 +886,10 @@ def scrape_multiple_channels(channel_urls: list, channel_names: list,
     return result
 
 
-# ── ★ 핵심 수정: 다중 채널 내 키워드 검색 ─────────────────
+# ── 다중 채널 내 키워드 검색 ─────────────────────────────
 def scrape_multiple_channels_search(channel_urls: list, channel_names: list,
                                     search_keyword: str,
                                     progress_cb=None) -> pd.DataFrame:
-    """
-    여러 채널에서 키워드로 각각 검색하여 결과를 합칩니다.
-    """
     all_dfs = []
     total = len(channel_urls)
     for i, (url, name) in enumerate(zip(channel_urls, channel_names)):
@@ -925,6 +921,7 @@ def scrape_multiple_channels_search(channel_urls: list, channel_names: list,
 def _parse_search_results(soup: BeautifulSoup) -> pd.DataFrame:
     renderers = soup.find_all('ytd-video-renderer')
     titles, links, views, dates = [], [], [], []
+    channel_names_list, channel_urls_list = [], []
     for renderer in renderers:
         a_tag = renderer.find(class_='yt-simple-endpoint style-scope ytd-video-renderer')
         if not a_tag or not a_tag.get('href'):
@@ -935,11 +932,19 @@ def _parse_search_results(soup: BeautifulSoup) -> pd.DataFrame:
         raw = meta.get_text(separator='|').strip() if meta else ''
         views.append(_extract_view(raw))
         dates.append(_extract_date(raw))
-    return _build_df(titles, links, views, dates)
+        # 채널명 추출 시도
+        ch_tag = renderer.find('yt-formatted-string', class_=lambda c: c and 'ytd-channel-name' in c)
+        ch_name = ch_tag.get_text(strip=True) if ch_tag else ''
+        ch_a = renderer.find('a', class_=lambda c: c and 'yt-simple-endpoint' in c and 'ytd-channel-name' in c)
+        ch_url = ('https://youtube.com' + ch_a['href']) if ch_a and ch_a.get('href') else ''
+        channel_names_list.append(ch_name)
+        channel_urls_list.append(ch_url)
+    return _build_df(titles, links, views, dates, channel_names_list, channel_urls_list)
 
 
 def _parse_channel_results(soup: BeautifulSoup) -> pd.DataFrame:
     titles, links, views, dates = [], [], [], []
+    channel_names_list, channel_urls_list = [], []
 
     items = soup.find_all('ytd-rich-item-renderer')
     if not items:
@@ -967,11 +972,13 @@ def _parse_channel_results(soup: BeautifulSoup) -> pd.DataFrame:
         links.append(link)
         views.append(_extract_view(raw))
         dates.append(_extract_date(raw))
+        channel_names_list.append('')
+        channel_urls_list.append('')
 
     if not titles:
         return _parse_search_results(soup)
 
-    return _build_df(titles, links, views, dates)
+    return _build_df(titles, links, views, dates, channel_names_list, channel_urls_list)
 
 
 # ── 공통 파싱 헬퍼 ────────────────────────────────────
@@ -1009,19 +1016,25 @@ def _extract_date(text: str) -> str:
 def _empty_df() -> pd.DataFrame:
     return pd.DataFrame(columns=[
         'title', 'link', 'view', 'upload_date',
-        'view_num', 'days_ago', 'is_shorts'
+        'view_num', 'days_ago', 'is_shorts',
+        'channel_name', 'channel_url'
     ])
 
 
-def _build_df(titles, links, views, dates) -> pd.DataFrame:
+def _build_df(titles, links, views, dates,
+              channel_names=None, channel_urls=None) -> pd.DataFrame:
     min_len = min(len(titles), len(links), len(views), len(dates))
     if min_len == 0:
         return _empty_df()
+    channel_names = channel_names or [''] * min_len
+    channel_urls  = channel_urls  or [''] * min_len
     df = pd.DataFrame({
-        'title':       [str(t) for t in titles[:min_len]],
-        'link':        [str(l) for l in links[:min_len]],
-        'view':        [str(v) for v in views[:min_len]],
-        'upload_date': [str(d) for d in dates[:min_len]],
+        'title':        [str(t) for t in titles[:min_len]],
+        'link':         [str(l) for l in links[:min_len]],
+        'view':         [str(v) for v in views[:min_len]],
+        'upload_date':  [str(d) for d in dates[:min_len]],
+        'channel_name': [str(c) for c in channel_names[:min_len]],
+        'channel_url':  [str(u) for u in channel_urls[:min_len]],
     })
     df['view_num'] = df['view'].apply(parse_view_count)
     df['days_ago'] = df['upload_date'].apply(date_to_days)
@@ -1041,10 +1054,12 @@ def _rows_to_df(rows: list) -> pd.DataFrame:
         if not isinstance(r, dict):
             continue
         clean_rows.append({
-            'title':       str(r.get('title', '')),
-            'link':        str(r.get('link', '')),
-            'view':        str(r.get('view', '')),
-            'upload_date': str(r.get('upload_date', '')),
+            'title':        str(r.get('title', '')),
+            'link':         str(r.get('link', '')),
+            'view':         str(r.get('view', '')),
+            'upload_date':  str(r.get('upload_date', '')),
+            'channel_name': str(r.get('channel_name', '')),
+            'channel_url':  str(r.get('channel_url', '')),
         })
 
     if not clean_rows:
@@ -1105,6 +1120,91 @@ top_keywords는 5개, recommended_title_patterns는 3개를 추천해 주세요.
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1000,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.content[0].text
+
+
+# ── ★ NEW: 채널 통계 집계 함수 ────────────────────────
+def extract_channel_stats(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    수집된 영상 데이터에서 채널별 통계를 집계합니다.
+    channel_name 컬럼을 기준으로 그룹핑합니다.
+    """
+    if 'channel_name' not in df.columns:
+        return pd.DataFrame()
+
+    # 채널명이 있는 행만 사용
+    ch_df = df[df['channel_name'].str.strip() != ''].copy()
+    if ch_df.empty:
+        return pd.DataFrame()
+
+    agg = ch_df.groupby('channel_name').agg(
+        video_count=('link', 'count'),
+        avg_view=('view_num', 'mean'),
+        max_view=('view_num', 'max'),
+        total_view=('view_num', 'sum'),
+        channel_url=('channel_url', 'first'),
+        shorts_count=('is_shorts', 'sum'),
+    ).reset_index()
+
+    agg['avg_view'] = agg['avg_view'].astype(int)
+    agg['max_view'] = agg['max_view'].astype(int)
+    agg['total_view'] = agg['total_view'].astype(int)
+    agg['shorts_count'] = agg['shorts_count'].astype(int)
+    agg['regular_count'] = agg['video_count'] - agg['shorts_count']
+
+    # 점수: 평균 조회수 60% + 영상 수 20% + 최고 조회수 20%
+    max_avg = agg['avg_view'].max() or 1
+    max_cnt = agg['video_count'].max() or 1
+    max_max = agg['max_view'].max() or 1
+    agg['score'] = (
+        (agg['avg_view'] / max_avg) * 0.6 +
+        (agg['video_count'] / max_cnt) * 0.2 +
+        (agg['max_view'] / max_max) * 0.2
+    ) * 100
+
+    agg = agg.sort_values('score', ascending=False).reset_index(drop=True)
+    agg['rank'] = agg.index + 1
+
+    return agg
+
+
+# ── ★ NEW: AI 추천 채널 분석 함수 ─────────────────────
+def get_ai_channel_recommendations(channel_stats: pd.DataFrame,
+                                   search_keyword: str) -> str:
+    """
+    채널별 통계를 바탕으로 AI가 추천 채널을 분석합니다.
+    """
+    top_channels = channel_stats.head(20).to_dict(orient='records')
+
+    prompt = f"""당신은 유튜브 채널 분석 전문가입니다.
+아래는 '{search_keyword}' 키워드 검색 결과에서 수집된 채널별 통계입니다.
+
+{json.dumps(top_channels, ensure_ascii=False, indent=2)}
+
+각 채널의 video_count(영상 수), avg_view(평균 조회수), max_view(최고 조회수), total_view(총 조회수), score(종합 점수)를 종합 분석하여 다음 JSON을 반환하세요. JSON만 출력하고 다른 텍스트는 절대 포함하지 마세요.
+
+{{
+  "recommended_channels": [
+    {{
+      "channel_name": "채널명",
+      "reason": "이 채널을 추천하는 구체적 이유 (데이터 근거 포함, 2~3문장)",
+      "strength": "채널의 핵심 강점 (예: 꾸준한 업로드, 높은 평균 조회수 등)",
+      "content_strategy": "이 채널에서 배울 수 있는 콘텐츠 전략 팁",
+      "avg_view_label": "평균 조회수 표시 (예: 약 12만)"
+    }}
+  ],
+  "market_insight": "이 키워드 분야의 채널 생태계에 대한 핵심 인사이트 (3~4문장)",
+  "entry_strategy": "신규 채널이 이 키워드로 성장하기 위한 전략 조언 (3~4문장)"
+}}
+
+recommended_channels는 최대 5개를 선정해 주세요. 단순히 조회수가 높은 채널보다, 실질적으로 벤치마킹할 가치가 있는 채널을 우선 추천해 주세요."""
+
+    client = anthropic.Anthropic()
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1500,
         messages=[{"role": "user", "content": prompt}]
     )
     return response.content[0].text
@@ -1185,13 +1285,14 @@ def render_results():
                 unsafe_allow_html=True)
     st.markdown("---")
 
-    tab1, tab2 = st.tabs(["📊 수집 결과", "🤖 AI 키워드 추천"])
+    # ── ★ 탭에 "추천 채널" 추가 ───────────────────────
+    tab1, tab2, tab3 = st.tabs(["📊 수집 결과", "📺 추천 채널", "🤖 AI 키워드 추천"])
 
     with tab1:
         if len(df_sorted) == 0:
             st.warning("⚠️ 해당 조건에 맞는 영상이 없습니다. 조건을 변경해 보세요.")
         else:
-            drop_cols = ['view_num', 'days_ago', '_debug']
+            drop_cols = ['view_num', 'days_ago', '_debug', 'channel_name', 'channel_url']
             df_display = df_sorted.drop(columns=[c for c in drop_cols if c in df_sorted.columns]).copy()
             df_display['is_shorts'] = df_display['is_shorts'].apply(
                 lambda x: "🩳 쇼츠" if x else "🎬 일반"
@@ -1219,7 +1320,97 @@ def render_results():
             type="primary"
         )
 
+    # ── ★ NEW: 추천 채널 탭 ───────────────────────────
     with tab2:
+        st.subheader("📺 키워드 추천 채널")
+        st.caption(f"수집된 영상 데이터를 기반으로 **'{keyword or '검색'}'** 키워드에서 주목할 만한 채널을 분석합니다.")
+
+        # 채널 통계 집계
+        channel_stats = extract_channel_stats(df_sorted)
+
+        if channel_stats.empty:
+            st.info(
+                "ℹ️ 채널 정보가 수집되지 않았습니다.\n\n"
+                "채널 추천 기능은 **키워드 검색** 모드에서 가장 잘 동작합니다. "
+                "키워드로 검색하면 각 영상의 채널 정보가 함께 수집됩니다."
+            )
+        else:
+            # ── 상단: 채널 통계 표 ────────────────────
+            st.markdown("### 📊 채널별 영상 현황")
+
+            display_stats = channel_stats[['rank', 'channel_name', 'video_count',
+                                           'avg_view', 'max_view', 'total_view',
+                                           'regular_count', 'shorts_count', 'channel_url']].copy()
+
+            def fmt_view(v):
+                if v >= 100_000_000:
+                    return f"{v/100_000_000:.1f}억"
+                elif v >= 10_000:
+                    return f"{v/10_000:.1f}만"
+                elif v >= 1_000:
+                    return f"{v/1_000:.1f}천"
+                return str(v)
+
+            display_stats['avg_view']   = display_stats['avg_view'].apply(fmt_view)
+            display_stats['max_view']   = display_stats['max_view'].apply(fmt_view)
+            display_stats['total_view'] = display_stats['total_view'].apply(fmt_view)
+            display_stats['channel_url'] = display_stats['channel_url'].apply(
+                lambda x: f'<a href="{x}" target="_blank">🔗 채널</a>' if x and x.startswith('http') else ''
+            )
+            display_stats = display_stats.rename(columns={
+                'rank':          '순위',
+                'channel_name':  '채널명',
+                'video_count':   '영상 수',
+                'avg_view':      '평균 조회수',
+                'max_view':      '최고 조회수',
+                'total_view':    '총 조회수',
+                'regular_count': '일반',
+                'shorts_count':  '쇼츠',
+                'channel_url':   '링크',
+            })
+            st.write(display_stats.to_html(escape=False, index=False), unsafe_allow_html=True)
+
+            st.divider()
+
+            # ── AI 추천 채널 분석 ─────────────────────
+            st.markdown("### 🤖 AI 채널 추천 분석")
+
+            # 캐시 확인 (같은 키워드면 재사용)
+            cache_hit = (
+                st.session_state.channel_recommendations is not None and
+                st.session_state.channel_rec_keyword == (keyword or '')
+            )
+
+            if cache_hit:
+                result_json = st.session_state.channel_recommendations
+                _render_channel_rec(result_json, keyword)
+            else:
+                col_btn, col_info = st.columns([1, 3])
+                with col_btn:
+                    analyze_btn = st.button(
+                        "🔍 AI 채널 분석 시작",
+                        type="primary",
+                        use_container_width=True,
+                        key="analyze_channel_btn"
+                    )
+                with col_info:
+                    st.caption("AI가 채널 통계를 분석해 벤치마킹할 채널과 콘텐츠 전략을 추천합니다.")
+
+                if analyze_btn:
+                    with st.spinner("🧠 AI가 채널 데이터를 분석 중입니다..."):
+                        try:
+                            raw = get_ai_channel_recommendations(channel_stats, keyword or "검색")
+                            raw_clean = re.sub(r'```json|```', '', raw).strip()
+                            result_json = json.loads(raw_clean)
+                            st.session_state.channel_recommendations = result_json
+                            st.session_state.channel_rec_keyword = keyword or ''
+                            _render_channel_rec(result_json, keyword)
+                        except json.JSONDecodeError:
+                            st.markdown(raw)
+                        except Exception as e:
+                            st.error(f"❌ AI 분석 오류: {e}")
+
+    with tab3:
         st.subheader("🤖 AI 키워드 & 제목 패턴 추천")
         st.caption("조회수 상위 영상들을 AI가 분석하여 잘 터지는 키워드와 제목 패턴을 추천합니다.")
 
@@ -1251,22 +1442,66 @@ def render_results():
                 st.error(f"❌ AI 분석 오류: {e}")
 
 
+def _render_channel_rec(result_json: dict, keyword: str):
+    """AI 채널 추천 결과를 렌더링합니다."""
+    st.success("✅ AI 분석 완료")
+
+    # 시장 인사이트
+    market = result_json.get('market_insight', '')
+    if market:
+        st.info(f"🌏 **시장 인사이트**\n\n{market}")
+
+    # 추천 채널 카드
+    st.markdown("#### 🏆 벤치마킹 추천 채널")
+    rec_channels = result_json.get('recommended_channels', [])
+
+    for i, ch in enumerate(rec_channels, 1):
+        medal = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"][i - 1] if i <= 5 else f"#{i}"
+        ch_name = ch.get('channel_name', '알 수 없음')
+        avg_label = ch.get('avg_view_label', '')
+
+        with st.expander(
+            f"{medal} **{ch_name}**" + (f"  —  평균 {avg_label}" if avg_label else ""),
+            expanded=(i == 1)
+        ):
+            col_l, col_r = st.columns([1, 1])
+            with col_l:
+                st.markdown(f"**💬 추천 이유**\n\n{ch.get('reason', '')}")
+                st.markdown(f"**⭐ 핵심 강점**\n\n{ch.get('strength', '')}")
+            with col_r:
+                st.markdown(f"**📌 콘텐츠 전략 팁**\n\n{ch.get('content_strategy', '')}")
+
+    # 진입 전략
+    entry = result_json.get('entry_strategy', '')
+    if entry:
+        st.markdown("#### 🚀 신규 채널 진입 전략")
+        st.warning(entry)
+
+    # 재분석 버튼
+    if st.button("🔄 재분석", key="re_analyze_ch_btn"):
+        st.session_state.channel_recommendations = None
+        st.session_state.channel_rec_keyword = ''
+        st.rerun()
+
+
 # ── 실행 ─────────────────────────────────────────────
 if run_btn:
+    # 크롤링 실행 시 채널 추천 캐시 초기화
+    st.session_state.channel_recommendations = None
+    st.session_state.channel_rec_keyword = ''
+
     if search_mode == "키워드 검색" and not keyword:
         st.warning("⚠️ 검색 키워드를 입력해주세요!")
 
     elif search_mode == "채널 검색" and not st.session_state.selected_channels:
         st.warning("⚠️ 수집할 채널을 1개 이상 선택해주세요!")
 
-    # ── ★ 채널 내 키워드 검색 모드에서 키워드 미입력 체크
     elif (search_mode == "채널 검색" and
           st.session_state.get("channel_search_mode") == "키워드로 채널 내 검색" and
           not keyword):
         st.warning("⚠️ 채널 내 검색할 키워드를 입력해주세요!")
 
     else:
-        # 매 실행마다 디버그 초기화 (이전 실행 캐시 제거)
         st.session_state.scrape_debug = {}
 
         try:
@@ -1287,11 +1522,9 @@ if run_btn:
                     prog_bar.progress(pct, text=f"({i+1}/{total}) '{name}' 수집 중...")
                     status_tx.info(f"🔄 **{name}** 채널 크롤링 중...")
 
-                # ── ★ 검색 방식에 따라 분기 ──────────────────
                 ch_mode = st.session_state.get("channel_search_mode", "탭 수집 (전체 영상)")
 
                 if ch_mode == "키워드로 채널 내 검색":
-                    # 채널 내 키워드 검색
                     st.info(f"🔍 각 채널에서 **'{keyword}'** 키워드로 검색합니다.")
                     df = scrape_multiple_channels_search(
                         sel_urls, sel_names,
@@ -1299,7 +1532,6 @@ if run_btn:
                         progress_cb=progress_cb
                     )
                 else:
-                    # 기존 탭 수집 방식
                     tab_sel = channel_tab if content_type != "쇼츠만" else "쇼츠"
                     df = scrape_multiple_channels(
                         sel_urls, sel_names,
@@ -1312,7 +1544,6 @@ if run_btn:
 
             total_collected = len(df)
 
-            # ── 날짜 필터 (키워드 검색만) ─────────────
             if search_mode == "키워드 검색":
                 day_limit = UPLOAD_DAY_LIMIT.get(upload_filter, 9999)
                 if day_limit < 9999:
@@ -1320,23 +1551,17 @@ if run_btn:
 
             ch_mode = st.session_state.get("channel_search_mode", "탭 수집 (전체 영상)")
 
-            # ── 콘텐츠 유형 필터 ──────────────────────
-            # 채널 내 키워드 검색: 결과 UI 필터에서만 적용 (수집 후 즉시 필터 X)
-            # 탭 수집 / 전체 키워드 검색: 즉시 적용
             if search_mode == "키워드 검색" or ch_mode == "탭 수집 (전체 영상)":
                 df = filter_content_type(df, content_type)
 
-            # ── 제목 키워드 필터 (탭 수집 모드에서만) ──
             if (search_mode == "채널 검색" and
                 ch_mode == "탭 수집 (전체 영상)" and
                 keyword):
                 df = df[df['title'].str.contains(keyword, case=False, na=False)]
 
-            # ── 조회수 필터 ───────────────────────────
             if use_view_filter and min_view > 0:
                 df = df[df['view_num'] >= min_view]
 
-            # ── 결과 저장 ─────────────────────────────
             if df.empty or 'title' not in df.columns:
                 st.warning("⚠️ 영상 데이터를 가져오지 못했습니다. 채널명/키워드를 확인하거나 잠시 후 다시 시도해주세요.")
             else:
@@ -1345,7 +1570,6 @@ if run_btn:
                 st.session_state.total_collected = total_collected
                 st.session_state.filtered_count = len(df)
 
-            # ── 디버그 (항상 표시) ────────────────────
             if st.session_state.get('scrape_debug'):
                 with st.expander("🔍 디버그 정보 (개발자용)", expanded=df.empty):
                     st.json(st.session_state.scrape_debug)
