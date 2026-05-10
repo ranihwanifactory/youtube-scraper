@@ -3,7 +3,6 @@ import time
 import random
 import re
 import json
-import io
 import pandas as pd
 import anthropic
 from selenium import webdriver
@@ -835,10 +834,10 @@ def scrape_subscribers_batch(channel_stats: pd.DataFrame,
 
 
 # ── 채널 통계 엑셀 생성 함수 ─────────────────────────
-def build_channel_excel(channel_stats: pd.DataFrame, keyword: str) -> bytes:
+def build_channel_csv(channel_stats: pd.DataFrame, keyword: str) -> bytes:
     """
-    채널 통계 DataFrame을 xlsxwriter(pandas 내장)로 엑셀 바이트 생성.
-    openpyxl 불필요 – pandas + xlsxwriter만 사용.
+    채널 통계를 CSV(utf-8-sig)로 변환 – 외부 라이브러리 불필요.
+    utf-8-sig 인코딩으로 엑셀에서 한글이 깨지지 않습니다.
     """
     def _fmt(v):
         v = int(v) if v else 0
@@ -847,100 +846,21 @@ def build_channel_excel(channel_stats: pd.DataFrame, keyword: str) -> bytes:
         if v >= 1_000:       return f"{v/1_000:.1f}천"
         return str(v)
 
-    # ── 출력용 DataFrame 구성 ────────────────────────
     out = pd.DataFrame()
-    out['순위']      = channel_stats.get('rank',          range(1, len(channel_stats)+1))
-    out['채널명']    = channel_stats.get('channel_name',  '')
-    out['구독자']    = channel_stats.get('subscriber', 0).apply(
-                           lambda v: fmt_subscriber(int(v)) if int(v) > 0 else '-')
-    out['영상 수']   = channel_stats.get('video_count',   0).astype(int)
-    out['평균 조회수'] = channel_stats.get('avg_view',  0).apply(_fmt)
-    out['최고 조회수'] = channel_stats.get('max_view',  0).apply(_fmt)
-    out['총 조회수']   = channel_stats.get('total_view',0).apply(_fmt)
-    out['일반 영상'] = channel_stats.get('regular_count', 0).astype(int)
-    out['쇼츠']      = channel_stats.get('shorts_count',  0).astype(int)
-    out['종합 점수'] = channel_stats.get('score', 0).apply(lambda v: round(float(v), 1))
-    out['채널 링크'] = channel_stats.get('channel_url', '')
+    out['순위']        = channel_stats.get('rank', range(1, len(channel_stats)+1))
+    out['채널명']      = channel_stats.get('channel_name', '')
+    out['구독자']      = channel_stats.get('subscriber', 0).apply(
+                             lambda v: fmt_subscriber(int(v)) if int(v) > 0 else '-')
+    out['영상 수']     = channel_stats.get('video_count', 0).astype(int)
+    out['평균 조회수'] = channel_stats.get('avg_view', 0).apply(_fmt)
+    out['최고 조회수'] = channel_stats.get('max_view', 0).apply(_fmt)
+    out['총 조회수']   = channel_stats.get('total_view', 0).apply(_fmt)
+    out['일반 영상']   = channel_stats.get('regular_count', 0).astype(int)
+    out['쇼츠']        = channel_stats.get('shorts_count', 0).astype(int)
+    out['종합 점수']   = channel_stats.get('score', 0).apply(lambda v: round(float(v), 1))
+    out['채널 링크']   = channel_stats.get('channel_url', '')
 
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
-        # 메타 시트 (제목·날짜)
-        meta = pd.DataFrame({
-            '항목': [f"'{keyword or '검색'}' 키워드 추천 채널 분석",
-                     f"수집일: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}  |  총 {len(channel_stats)}개 채널"]
-        })
-        meta.to_excel(writer, sheet_name='추천 채널', index=False, startrow=0, header=False)
-        out.to_excel(writer, sheet_name='추천 채널', index=False, startrow=2)
-
-        wb  = writer.book
-        ws  = writer.sheets['추천 채널']
-
-        # ── 포맷 정의 ────────────────────────────────
-        hdr_fmt  = wb.add_format({'bold': True, 'font_color': '#FFFFFF',
-                                  'bg_color': '#1F4E79', 'border': 1,
-                                  'align': 'center', 'valign': 'vcenter',
-                                  'font_name': 'Arial', 'font_size': 11})
-        title_fmt = wb.add_format({'bold': True, 'font_color': '#1F4E79',
-                                   'bg_color': '#EBF3FB', 'font_size': 14,
-                                   'align': 'center', 'valign': 'vcenter',
-                                   'font_name': 'Arial'})
-        sub_fmt  = wb.add_format({'italic': True, 'font_color': '#666666',
-                                  'font_size': 9, 'align': 'center',
-                                  'font_name': 'Arial'})
-        gold_fmt = wb.add_format({'bg_color': '#FFD700', 'border': 1,
-                                  'font_name': 'Arial', 'bold': True})
-        silv_fmt = wb.add_format({'bg_color': '#C0C0C0', 'border': 1,
-                                  'font_name': 'Arial', 'bold': True})
-        brnz_fmt = wb.add_format({'bg_color': '#CD7F32', 'border': 1,
-                                  'font_name': 'Arial', 'bold': True})
-        even_fmt = wb.add_format({'bg_color': '#DEEAF1', 'border': 1,
-                                  'font_name': 'Arial'})
-        odd_fmt  = wb.add_format({'bg_color': '#FFFFFF', 'border': 1,
-                                  'font_name': 'Arial'})
-        link_fmt = wb.add_format({'font_color': '#0563C1', 'underline': True,
-                                  'border': 1, 'font_name': 'Arial'})
-        center_fmt = wb.add_format({'align': 'center', 'border': 1,
-                                    'font_name': 'Arial'})
-
-        # ── 제목·부제 행 ─────────────────────────────
-        num_cols = len(out.columns)
-        ws.merge_range(0, 0, 0, num_cols - 1, meta.iloc[0, 0], title_fmt)
-        ws.merge_range(1, 0, 1, num_cols - 1, meta.iloc[1, 0], sub_fmt)
-        ws.set_row(0, 28)
-        ws.set_row(1, 16)
-        ws.set_row(2, 20)  # 헤더
-
-        # ── 헤더 재포맷 ──────────────────────────────
-        for col_idx, col_name in enumerate(out.columns):
-            ws.write(2, col_idx, col_name, hdr_fmt)
-
-        # ── 컬럼 너비 ─────────────────────────────────
-        widths = [6, 24, 10, 8, 12, 12, 12, 8, 6, 10, 40]
-        for i, w in enumerate(widths[:num_cols]):
-            ws.set_column(i, i, w)
-
-        # ── 데이터 행 색상 ────────────────────────────
-        medal = {1: gold_fmt, 2: silv_fmt, 3: brnz_fmt}
-        for r_idx, (_, row) in enumerate(out.iterrows()):
-            rank = int(channel_stats.iloc[r_idx].get('rank', r_idx + 1))
-            row_fmt = medal.get(rank, even_fmt if r_idx % 2 == 0 else odd_fmt)
-            excel_row = r_idx + 3  # 제목(0)+부제(1)+헤더(2) → 데이터 시작 row=3
-
-            for c_idx, val in enumerate(row):
-                col_name = out.columns[c_idx]
-                if col_name == '채널 링크' and str(val).startswith('http'):
-                    ws.write_url(excel_row, c_idx, str(val), link_fmt, str(val))
-                elif col_name == '순위':
-                    ws.write(excel_row, c_idx, int(val), row_fmt)
-                else:
-                    ws.write(excel_row, c_idx, val, row_fmt)
-
-        # ── 틀 고정 & 자동 필터 ───────────────────────
-        ws.freeze_panes(3, 0)
-        ws.autofilter(2, 0, 2 + len(out), num_cols - 1)
-
-    buf.seek(0)
-    return buf.getvalue()
+    return out.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
 
 
 # ── 키워드 검색 스크래퍼 ───────────────────────────────
@@ -1725,27 +1645,27 @@ def render_results():
             display_stats = display_stats.rename(columns=display_rename)
             st.write(display_stats.to_html(escape=False, index=False), unsafe_allow_html=True)
 
-            # ── 엑셀 다운로드 ─────────────────────────
+            # ── CSV 다운로드 ──────────────────────────
             st.divider()
             st.markdown("#### ⬇️ 채널 분석 데이터 다운로드")
             dl_col1, dl_col2 = st.columns([1, 3])
             with dl_col1:
                 try:
-                    excel_bytes = build_channel_excel(channel_stats_sorted, keyword)
+                    csv_bytes = build_channel_csv(channel_stats_sorted, keyword)
                     st.download_button(
-                        label="📥 엑셀(.xlsx) 다운로드",
-                        data=excel_bytes,
-                        file_name=f"추천채널_{keyword or 'channel'}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        label="📥 CSV 다운로드 (엑셀 열기 가능)",
+                        data=csv_bytes,
+                        file_name=f"추천채널_{keyword or 'channel'}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
+                        mime="text/csv",
                         type="primary",
                         use_container_width=True,
                     )
                 except Exception as e:
-                    st.error(f"엑셀 생성 오류: {e}")
+                    st.error(f"CSV 생성 오류: {e}")
             with dl_col2:
                 st.caption(
                     "채널명, 구독자 수, 영상 수, 평균/최고/총 조회수, 종합 점수, 채널 링크가 포함됩니다.\n"
-                    "구독자 수를 먼저 수집하면 더 완성된 데이터를 받을 수 있습니다."
+                    "다운로드한 CSV 파일을 엑셀에서 바로 열 수 있습니다 (한글 깨짐 없음)."
                 )
 
             st.divider()
