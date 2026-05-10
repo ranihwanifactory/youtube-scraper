@@ -6,9 +6,6 @@ import json
 import io
 import pandas as pd
 import anthropic
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -840,142 +837,108 @@ def scrape_subscribers_batch(channel_stats: pd.DataFrame,
 # ── 채널 통계 엑셀 생성 함수 ─────────────────────────
 def build_channel_excel(channel_stats: pd.DataFrame, keyword: str) -> bytes:
     """
-    채널 통계 DataFrame을 예쁘게 포맷된 엑셀 바이트로 반환합니다.
+    채널 통계 DataFrame을 xlsxwriter(pandas 내장)로 엑셀 바이트 생성.
+    openpyxl 불필요 – pandas + xlsxwriter만 사용.
     """
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "추천 채널"
+    def _fmt(v):
+        v = int(v) if v else 0
+        if v >= 100_000_000: return f"{v/100_000_000:.1f}억"
+        if v >= 10_000:      return f"{v/10_000:.1f}만"
+        if v >= 1_000:       return f"{v/1_000:.1f}천"
+        return str(v)
 
-    # ── 색상 정의 ────────────────────────────────────
-    HDR_FILL  = PatternFill("solid", fgColor="1F4E79")   # 진한 파랑
-    ROW1_FILL = PatternFill("solid", fgColor="DEEAF1")   # 연한 파랑
-    ROW2_FILL = PatternFill("solid", fgColor="FFFFFF")   # 흰색
-    GOLD_FILL = PatternFill("solid", fgColor="FFD700")   # 금색 (1위)
-    SILV_FILL = PatternFill("solid", fgColor="C0C0C0")   # 은색 (2위)
-    BRNZ_FILL = PatternFill("solid", fgColor="CD7F32")   # 동색 (3위)
-
-    HDR_FONT  = Font(name='Arial', bold=True, color='FFFFFF', size=11)
-    BODY_FONT = Font(name='Arial', size=10)
-    BOLD_FONT = Font(name='Arial', bold=True, size=10)
-    LINK_FONT = Font(name='Arial', size=10, color='0563C1', underline='single')
-
-    center  = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    left    = Alignment(horizontal='left',   vertical='center', wrap_text=True)
-    right   = Alignment(horizontal='right',  vertical='center')
-
-    thin = Side(style='thin', color='B0B0B0')
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    # ── 제목 행 ──────────────────────────────────────
-    ws.merge_cells('A1:K1')
-    title_cell = ws['A1']
-    title_cell.value = f"📺 '{keyword or '검색'}' 키워드 추천 채널 분석"
-    title_cell.font = Font(name='Arial', bold=True, size=14, color='1F4E79')
-    title_cell.alignment = center
-    title_cell.fill = PatternFill("solid", fgColor="EBF3FB")
-    ws.row_dimensions[1].height = 30
-
-    ws.merge_cells('A2:K2')
-    ws['A2'].value = f"수집일: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}  |  총 {len(channel_stats)}개 채널"
-    ws['A2'].font = Font(name='Arial', size=9, color='666666', italic=True)
-    ws['A2'].alignment = center
-    ws.row_dimensions[2].height = 18
-
-    # ── 헤더 행 ──────────────────────────────────────
-    headers = [
-        ('순위', 6), ('채널명', 22), ('구독자', 12), ('영상 수', 9),
-        ('평균 조회수', 12), ('최고 조회수', 12), ('총 조회수', 12),
-        ('일반 영상', 9), ('쇼츠', 7), ('종합 점수', 10), ('채널 링크', 30),
-    ]
-    col_keys = [
-        'rank', 'channel_name', 'subscriber', 'video_count',
-        'avg_view', 'max_view', 'total_view',
-        'regular_count', 'shorts_count', 'score', 'channel_url',
-    ]
-
-    for col_idx, (hdr, width) in enumerate(headers, 1):
-        cell = ws.cell(row=3, column=col_idx, value=hdr)
-        cell.font = HDR_FONT
-        cell.fill = HDR_FILL
-        cell.alignment = center
-        cell.border = border
-        ws.column_dimensions[get_column_letter(col_idx)].width = width
-    ws.row_dimensions[3].height = 22
-
-    # ── 데이터 행 ─────────────────────────────────────
-    def fmt_num(v):
-        if v >= 100_000_000:
-            return f"{v/100_000_000:.1f}억"
-        if v >= 10_000:
-            return f"{v/10_000:.1f}만"
-        if v >= 1_000:
-            return f"{v/1_000:.1f}천"
-        return str(int(v)) if v else '0'
-
-    medal_fills = {1: GOLD_FILL, 2: SILV_FILL, 3: BRNZ_FILL}
-
-    for row_idx, (_, row) in enumerate(channel_stats.iterrows(), 4):
-        rank = row.get('rank', row_idx - 3)
-        fill = medal_fills.get(rank, ROW1_FILL if (row_idx % 2 == 0) else ROW2_FILL)
-        ws.row_dimensions[row_idx].height = 20
-
-        for col_idx, key in enumerate(col_keys, 1):
-            cell = ws.cell(row=row_idx, column=col_idx)
-            cell.border = border
-            cell.fill = fill
-
-            val = row.get(key, '')
-
-            if key == 'rank':
-                cell.value = int(rank)
-                cell.font = BOLD_FONT
-                cell.alignment = center
-
-            elif key == 'channel_name':
-                cell.value = str(val)
-                cell.font = BOLD_FONT if rank <= 3 else BODY_FONT
-                cell.alignment = left
-
-            elif key == 'subscriber':
-                sub_n = int(val) if val else 0
-                cell.value = fmt_subscriber(sub_n) if sub_n > 0 else '-'
-                cell.font = BODY_FONT
-                cell.alignment = right
-
-            elif key in ('avg_view', 'max_view', 'total_view'):
-                cell.value = fmt_num(int(val) if val else 0)
-                cell.font = BODY_FONT
-                cell.alignment = right
-
-            elif key == 'score':
-                cell.value = round(float(val), 1) if val else 0
-                cell.font = BODY_FONT
-                cell.alignment = center
-
-            elif key == 'channel_url':
-                url = str(val)
-                if url.startswith('http'):
-                    cell.value = url
-                    cell.hyperlink = url
-                    cell.font = LINK_FONT
-                else:
-                    cell.value = '-'
-                    cell.font = BODY_FONT
-                cell.alignment = left
-
-            else:
-                cell.value = int(val) if val else 0
-                cell.font = BODY_FONT
-                cell.alignment = center
-
-    # ── 틀 고정 ──────────────────────────────────────
-    ws.freeze_panes = 'A4'
-
-    # ── 자동 필터 ─────────────────────────────────────
-    ws.auto_filter.ref = f"A3:K{3 + len(channel_stats)}"
+    # ── 출력용 DataFrame 구성 ────────────────────────
+    out = pd.DataFrame()
+    out['순위']      = channel_stats.get('rank',          range(1, len(channel_stats)+1))
+    out['채널명']    = channel_stats.get('channel_name',  '')
+    out['구독자']    = channel_stats.get('subscriber', 0).apply(
+                           lambda v: fmt_subscriber(int(v)) if int(v) > 0 else '-')
+    out['영상 수']   = channel_stats.get('video_count',   0).astype(int)
+    out['평균 조회수'] = channel_stats.get('avg_view',  0).apply(_fmt)
+    out['최고 조회수'] = channel_stats.get('max_view',  0).apply(_fmt)
+    out['총 조회수']   = channel_stats.get('total_view',0).apply(_fmt)
+    out['일반 영상'] = channel_stats.get('regular_count', 0).astype(int)
+    out['쇼츠']      = channel_stats.get('shorts_count',  0).astype(int)
+    out['종합 점수'] = channel_stats.get('score', 0).apply(lambda v: round(float(v), 1))
+    out['채널 링크'] = channel_stats.get('channel_url', '')
 
     buf = io.BytesIO()
-    wb.save(buf)
+    with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+        # 메타 시트 (제목·날짜)
+        meta = pd.DataFrame({
+            '항목': [f"'{keyword or '검색'}' 키워드 추천 채널 분석",
+                     f"수집일: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}  |  총 {len(channel_stats)}개 채널"]
+        })
+        meta.to_excel(writer, sheet_name='추천 채널', index=False, startrow=0, header=False)
+        out.to_excel(writer, sheet_name='추천 채널', index=False, startrow=2)
+
+        wb  = writer.book
+        ws  = writer.sheets['추천 채널']
+
+        # ── 포맷 정의 ────────────────────────────────
+        hdr_fmt  = wb.add_format({'bold': True, 'font_color': '#FFFFFF',
+                                  'bg_color': '#1F4E79', 'border': 1,
+                                  'align': 'center', 'valign': 'vcenter',
+                                  'font_name': 'Arial', 'font_size': 11})
+        title_fmt = wb.add_format({'bold': True, 'font_color': '#1F4E79',
+                                   'bg_color': '#EBF3FB', 'font_size': 14,
+                                   'align': 'center', 'valign': 'vcenter',
+                                   'font_name': 'Arial'})
+        sub_fmt  = wb.add_format({'italic': True, 'font_color': '#666666',
+                                  'font_size': 9, 'align': 'center',
+                                  'font_name': 'Arial'})
+        gold_fmt = wb.add_format({'bg_color': '#FFD700', 'border': 1,
+                                  'font_name': 'Arial', 'bold': True})
+        silv_fmt = wb.add_format({'bg_color': '#C0C0C0', 'border': 1,
+                                  'font_name': 'Arial', 'bold': True})
+        brnz_fmt = wb.add_format({'bg_color': '#CD7F32', 'border': 1,
+                                  'font_name': 'Arial', 'bold': True})
+        even_fmt = wb.add_format({'bg_color': '#DEEAF1', 'border': 1,
+                                  'font_name': 'Arial'})
+        odd_fmt  = wb.add_format({'bg_color': '#FFFFFF', 'border': 1,
+                                  'font_name': 'Arial'})
+        link_fmt = wb.add_format({'font_color': '#0563C1', 'underline': True,
+                                  'border': 1, 'font_name': 'Arial'})
+        center_fmt = wb.add_format({'align': 'center', 'border': 1,
+                                    'font_name': 'Arial'})
+
+        # ── 제목·부제 행 ─────────────────────────────
+        num_cols = len(out.columns)
+        ws.merge_range(0, 0, 0, num_cols - 1, meta.iloc[0, 0], title_fmt)
+        ws.merge_range(1, 0, 1, num_cols - 1, meta.iloc[1, 0], sub_fmt)
+        ws.set_row(0, 28)
+        ws.set_row(1, 16)
+        ws.set_row(2, 20)  # 헤더
+
+        # ── 헤더 재포맷 ──────────────────────────────
+        for col_idx, col_name in enumerate(out.columns):
+            ws.write(2, col_idx, col_name, hdr_fmt)
+
+        # ── 컬럼 너비 ─────────────────────────────────
+        widths = [6, 24, 10, 8, 12, 12, 12, 8, 6, 10, 40]
+        for i, w in enumerate(widths[:num_cols]):
+            ws.set_column(i, i, w)
+
+        # ── 데이터 행 색상 ────────────────────────────
+        medal = {1: gold_fmt, 2: silv_fmt, 3: brnz_fmt}
+        for r_idx, (_, row) in enumerate(out.iterrows()):
+            rank = int(channel_stats.iloc[r_idx].get('rank', r_idx + 1))
+            row_fmt = medal.get(rank, even_fmt if r_idx % 2 == 0 else odd_fmt)
+            excel_row = r_idx + 3  # 제목(0)+부제(1)+헤더(2) → 데이터 시작 row=3
+
+            for c_idx, val in enumerate(row):
+                col_name = out.columns[c_idx]
+                if col_name == '채널 링크' and str(val).startswith('http'):
+                    ws.write_url(excel_row, c_idx, str(val), link_fmt, str(val))
+                elif col_name == '순위':
+                    ws.write(excel_row, c_idx, int(val), row_fmt)
+                else:
+                    ws.write(excel_row, c_idx, val, row_fmt)
+
+        # ── 틀 고정 & 자동 필터 ───────────────────────
+        ws.freeze_panes(3, 0)
+        ws.autofilter(2, 0, 2 + len(out), num_cols - 1)
+
     buf.seek(0)
     return buf.getvalue()
 
